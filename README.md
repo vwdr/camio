@@ -1,36 +1,133 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Camio - Intelligent Video Surveillance Platform
 
-## Getting Started
+Camio transforms any device with a camera into an intelligent security system powered by AI. Leverage cutting-edge visual language models for real-time video analysis, receive instant alerts for security events, and access a comprehensive library of recorded footage with detailed analytics.
 
-First, run the development server:
+![Dashboard Preview](/public/dashboard-preview.png)
 
+## 🚀 Features
+
+- **Universal Camera Compatibility**: Turn any device with a camera into a security system
+- **Real-time AI Analysis**: Video streams processed by Google's Gemini Visual Language Model
+- **Saved Footage Library**: Store and analyze past footage with security insights  
+- **Intuitive Dashboard**: Monitor multiple cameras simultaneously
+- **Instant Alerts**: Get notified immediately about security or emergency events
+- **AI Assistant**: OpenAI-powered contextual support for security questions
+- **Cross-Platform**: Works on desktops, tablets, and mobile devices
+
+## 🛠️ Technologies
+
+- **Frontend**: Next.js 15 (App Router) with TypeScript and Tailwind CSS
+- **UI Components**: ShadCN UI library for consistent design
+- **Authentication & Database**: Supabase for user management and data storage
+- **AI Processing**:
+  - Google Gemini for video analysis
+  - OpenAI for contextual assistant
+  - TensorFlow.js for client-side processing
+- **Notifications**: Resend API for email alerts
+
+## 📋 Prerequisites
+
+- Node.js 18.x or later
+- npm or yarn
+- Supabase account
+- Google Gemini API key
+- OpenAI API key
+- Resend API key
+
+## 🔧 Installation
+
+1. Clone this repository
+```bash
+git clone https://github.com/yourusername/camio.git
+cd camio
+```
+
+2. Install dependencies
+```bash
+npm install
+# or
+yarn install
+```
+
+3. Set up environment variables
+   - Copy `.env.example` to `.env.local`
+   - Fill in the required API keys and configuration values
+
+```bash
+cp .env.example .env.local
+```
+
+4. Start the development server
 ```bash
 npm run dev
 # or
 yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+5. Open [http://localhost:3000](http://localhost:3000) in your browser
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 📁 Project Structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+src/
+├── app/                # Next.js App Router pages
+│   ├── (auth)/         # Authentication routes (sign-in, sign-up)
+│   ├── (dashboard)/    # Dashboard routes (dashboard, cameras)
+│   └── api/            # API routes
+├── components/         # React components
+│   ├── auth/           # Authentication components
+│   ├── camera/         # Camera-related components
+│   ├── dashboard/      # Dashboard UI components
+│   ├── layout/         # Layout components (header, sidebar)
+│   └── ui/             # Reusable UI components
+└── lib/                # Utility functions and services
+    ├── ai/             # AI service integrations (Gemini, OpenAI)
+    └── supabase/       # Supabase client configuration
+```
 
-## Learn More
+## 🔒 Authentication
 
-To learn more about Next.js, take a look at the following resources:
+Camio uses Supabase for authentication. Users can sign up with email/password or sign in with social providers.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 📹 Camera Registration
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Users can register new cameras by providing a name, description, and connection details. The system generates a unique ID for each camera.
 
-## Deploy on Vercel
+## 📊 Dashboard
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The dashboard provides a comprehensive view of all registered cameras, with real-time feeds and AI analysis results.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 🤖 AI Analysis
+
+- **Google Gemini**: Processes video frames to detect objects, people, and unusual activities
+- **OpenAI**: Powers the contextual assistant for user queries
+
+## 📱 Responsive Design
+
+The UI is fully responsive and works seamlessly across desktop, tablet, and mobile devices.
+
+## 🧪 Development
+
+This project uses Next.js with Turbopack for fast development and building.
+
+```bash
+# Start development server
+npm run dev
+
+# Build for production
+npm run build
+
+# Start production server
+npm run start
+
+# Lint code
+npm run lint
+```
+
+## 📄 License
+
+[MIT License](LICENSE)
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
