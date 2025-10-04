@@ -10,7 +10,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { getRecordings, saveRecording } from '@/lib/recordings';
 import { addTimelineEvent, getTimeline } from '@/lib/timeline';
 import { Timeline as TimelineComp } from '@/components/dashboard/timeline';
-import { acquireStream, getExistingStream, releaseStream, attachStreamToElement } from '@/lib/localStream';
+import { acquireStream, getExistingStream, releaseStream } from '@/lib/localStream';
 import { useVideoAnalyzer } from '@/lib/useVideoAnalyzer';
 
 interface Camera {
@@ -99,12 +99,19 @@ export function CameraDetail({ camera }: CameraDetailProps) {
   useEffect(() => {
     let attached = false;
     let localStream: MediaStream | undefined;
-    let acquiredHere = false;
     const attach = async () => {
       if (camera.isLocal && camera.isRecording && videoRef.current) {
         try {
-          const acquired = await attachStreamToElement(videoRef.current, camera.id, { video: true, audio: false });
-          acquiredHere = acquired;
+          // Try to reuse existing stream first
+          const existing = getExistingStream(camera.id);
+          if (existing) {
+            localStream = existing;
+          } else {
+            localStream = await acquireStream(camera.id, { video: true, audio: false });
+          }
+          if (!videoRef.current) return;
+          videoRef.current.srcObject = localStream as MediaStream;
+          try { await videoRef.current.play(); } catch (e) { /* ignore */ }
           attached = true;
         } catch (e) {
           console.warn('Failed to attach shared live stream', e);
@@ -112,36 +119,12 @@ export function CameraDetail({ camera }: CameraDetailProps) {
       }
     };
     attach();
-
-    // monitor the video element for stalls or resolution flicker and try to reattach
-    let monitorId: number | undefined;
-    const startMonitor = () => {
-      if (!videoRef.current) return;
-      monitorId = window.setInterval(() => {
-        const v = videoRef.current as HTMLVideoElement | null;
-        if (!v) return;
-        // if the video has no frame or zero width/height, try reattaching
-        if ((v.readyState < 2) || v.videoWidth === 0 || v.videoHeight === 0) {
-          // try reattach once
-          try {
-            attachStreamToElement(v, camera.id, { video: true, audio: false });
-          } catch (e) {
-            // ignore
-          }
-        }
-      }, 800);
-    };
-    startMonitor();
     return () => {
-      if (monitorId) clearInterval(monitorId);
       if (attached && camera.isLocal) {
-        // Only release if we previously acquired the stream in this component.
-        if (acquiredHere) {
-          try {
-            releaseStream(camera.id);
-          } catch (e) {
-            // ignore
-          }
+        try {
+          releaseStream(camera.id);
+        } catch (e) {
+          // ignore
         }
       }
       if (videoRef.current) {
@@ -173,30 +156,6 @@ export function CameraDetail({ camera }: CameraDetailProps) {
 
   // When analyzer yields a medium/high alert, add timeline event once
   const lastAlertRef = useRef<string | null>(null);
-  // reusable thumbnail capture helper (used for analyzer-created events and testing)
-  const captureThumbnail = (): string | undefined => {
-    try {
-      const v = videoRef.current;
-      const overlay = canvasRef.current;
-      if (!v) return undefined;
-      const targetW = Math.min(320, v.videoWidth || 320);
-      const aspect = (v.videoHeight && v.videoWidth) ? (v.videoHeight / v.videoWidth) : (9/16);
-      const targetH = Math.max(64, Math.round(targetW * aspect));
-      const tmp = document.createElement('canvas');
-      tmp.width = targetW;
-      tmp.height = targetH;
-      const ctx = tmp.getContext('2d');
-      if (!ctx) return undefined;
-      try { ctx.drawImage(v, 0, 0, targetW, targetH); } catch (e) { /* ignore */ }
-      if (overlay) {
-        try { ctx.drawImage(overlay, 0, 0, targetW, targetH); } catch (e) { /* ignore */ }
-      }
-      return tmp.toDataURL('image/jpeg', 0.75);
-    } catch (e) {
-      console.warn('Thumbnail capture failed', e);
-      return undefined;
-    }
-  };
   useEffect(() => {
     if (!lastResult) return;
     const level = lastResult.alertLevel;
@@ -209,15 +168,11 @@ export function CameraDetail({ camera }: CameraDetailProps) {
       // create event
       const severity = level === 'high' ? 'high' : 'medium';
       const desc = level === 'high' ? 'Potential high severity incident detected' : 'Suspicious activity detected';
-
-      const thumbnail = captureThumbnail();
-
       addTimelineEvent(camera.id, {
         type: level === 'high' ? 'alert' : 'suspicious',
         description: desc,
         aiAnalysis: lastResult.summary,
         severity,
-        thumbnailUrl: thumbnail,
       });
       // refresh local timeline state
       setTimelineEvents(getTimeline(camera.id));
@@ -562,20 +517,6 @@ export function CameraDetail({ camera }: CameraDetailProps) {
                   // quick download placeholder: capture current frame if available
                   alert('Download functionality not implemented yet');
                 }}>Download</Button>
-                <Button variant="ghost" onClick={() => {
-                  // simulate an analyzer alert and create a timeline event with thumbnail for testing
-                  const thumb = captureThumbnail();
-                  addTimelineEvent(camera.id, {
-                    type: 'suspicious',
-                    description: 'Simulated alert (test)',
-                    aiAnalysis: 'simulated:test',
-                    severity: 'medium',
-                    thumbnailUrl: thumb,
-                  });
-                  window.dispatchEvent(new CustomEvent('camio:timeline:updated', { detail: { cameraId: camera.id } }));
-                  setTimelineEvents(getTimeline(camera.id));
-                  alert('Simulated alert added to timeline');
-                }}>Simulate Alert</Button>
               </div>
             </CardContent>
           </Card>
