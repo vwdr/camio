@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
+import { toast } from "sonner";
 import {
   Home,
   CameraIcon,
@@ -24,6 +25,32 @@ interface NavItem {
 
 export default function DashboardSidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+
+  const handleLogout = async () => {
+    try {
+      const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+      
+      if (!isSupabaseConfigured) {
+        toast.error('Authentication not configured');
+        return;
+      }
+      
+      const { error } = await supabase.auth.signOut();
+      
+      if (error) {
+        console.error('Logout error:', error);
+        toast.error('Failed to log out. Please try again.');
+        return;
+      }
+      
+      toast.success('Logged out successfully');
+      router.push('/sign-in');
+    } catch (err) {
+      console.error('Logout error:', err);
+      toast.error('Failed to log out. Please try again.');
+    }
+  };
 
   const navigation: NavItem[] = [
     {
@@ -83,7 +110,7 @@ export default function DashboardSidebar() {
             alt="Camio Logo"
             width={28}
             height={28}
-            className="mr-2"
+            className="mr-2 rounded bg-white p-1"
           />
           <span className="text-lg font-bold">Camio</span>
         </Link>
@@ -108,7 +135,11 @@ export default function DashboardSidebar() {
         variants={itemVariants}
         transition={itemTransition}
       >
-        <Button variant="ghost" className="w-full justify-start text-muted-foreground">
+        <Button 
+          variant="ghost" 
+          className="w-full justify-start text-muted-foreground"
+          onClick={handleLogout}
+        >
           <LogOut className="mr-3 h-5 w-5" />
           Log out
         </Button>

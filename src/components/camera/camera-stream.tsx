@@ -26,9 +26,14 @@ export function CameraStream() {
   const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
   const [streamId] = useState<string>(`camio-${Math.random().toString(36).substring(2, 15)}`);
   const [recordedChunks, setRecordedChunks] = useState<Blob[]>([]);
+  const [isSecure, setIsSecure] = useState<boolean>(true);
+  const [permissionHint, setPermissionHint] = useState<string>("");
 
   // Function to get available cameras
   useEffect(() => {
+    // Detect secure context; getUserMedia requires HTTPS or localhost
+    setIsSecure(typeof window !== 'undefined' ? window.isSecureContext : true);
+
     async function getAvailableCameras() {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
@@ -61,6 +66,15 @@ export function CameraStream() {
       
       toast.info("Camera streaming stopped");
     } else {
+      if (!isSecure) {
+        const host = typeof window !== 'undefined' ? window.location.host : '';
+        const proto = typeof window !== 'undefined' ? window.location.protocol : '';
+        setPermissionHint(
+          `Camera access is blocked because this page is not secure (${proto}//${host}). Use HTTPS or localhost to enable the camera.`
+        );
+        toast.error("Camera requires a secure (HTTPS) connection or localhost");
+        return;
+      }
       // Start streaming
       try {
         const constraints = {
@@ -81,9 +95,18 @@ export function CameraStream() {
         
         setIsStreaming(true);
         toast.success("Camera streaming started");
-      } catch (error) {
+      } catch (error: any) {
         console.error('Error accessing media devices:', error);
-        toast.error("Failed to access camera. Please check permissions.");
+        let message = "Failed to access camera. Please check permissions.";
+        if (error?.name === 'NotAllowedError') {
+          message = "Camera permission denied. Allow camera access in your browser settings.";
+        } else if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
+          message = "No camera found. Please connect a camera or check system permissions.";
+        } else if (error?.name === 'SecurityError') {
+          message = "Camera blocked on insecure connection. Use HTTPS or localhost.";
+        }
+        setPermissionHint(message);
+        toast.error(message);
       }
     }
   };
@@ -221,7 +244,17 @@ export function CameraStream() {
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 text-white">
               <Camera className="h-16 w-16 mb-2 opacity-50" />
               <p className="text-lg font-medium mb-4">Camera Preview</p>
-              <Button onClick={toggleStreaming} className="bg-primary">
+              {permissionHint && (
+                <div className="mb-4 max-w-md text-center text-sm text-red-300">
+                  {permissionHint}
+                  {!isSecure && (
+                    <div className="mt-2 text-xs text-white/80">
+                      Tip: Open this page over HTTPS (for example, via an HTTPS tunnel like ngrok) or run on localhost to grant camera access.
+                    </div>
+                  )}
+                </div>
+              )}
+              <Button onClick={toggleStreaming} className="bg-primary" disabled={!isSecure} title={!isSecure ? 'Use HTTPS or localhost to enable camera' : undefined}>
                 <Video className="mr-2 h-4 w-4" />
                 Start Streaming
               </Button>

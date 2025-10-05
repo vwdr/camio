@@ -52,32 +52,46 @@ export default function SignUpForm() {
     },
   });
 
-  // Handle form submission
+  // Handle form submission using Supabase auth
   async function onSubmit(values: z.infer<typeof formSchema>) {
     setIsLoading(true);
-    
-    try {
-      // In a real application, we would call the Supabase auth API here
-      // const { error } = await supabaseClient.auth.signUp({
-      //   email: values.email,
-      //   password: values.password,
-      //   options: {
-      //     data: {
-      //       name: values.name,
-      //     }
-      //   }
-      // });
 
-      // if (error) throw error;
-      
-      // Simulate successful signup for now
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      toast.success("Account created successfully!");
-      router.push("/dashboard");
-    } catch (error) {
-      console.error("Authentication error:", error);
-      toast.error("Failed to create account. Please try again.");
+    try {
+      const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+
+      if (!isSupabaseConfigured) {
+        toast.error('Auth is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local and restart the dev server.');
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signUp({
+        email: values.email,
+        password: values.password,
+        options: {
+          data: {
+            name: values.name,
+          },
+        },
+      });
+
+      if (error) {
+        console.error('Sign up failed:', error);
+        toast.error(error.message || 'Failed to create account. Please try again.');
+        return;
+      }
+
+      // Check if email confirmation is required
+      if (data?.user && !data?.session) {
+        toast.success('Account created! Please check your email and click the confirmation link before signing in.');
+      } else if (data?.session) {
+        toast.success('Account created successfully!');
+        router.push('/dashboard');
+      } else {
+        toast.success('Account created successfully!');
+      }
+    } catch (err) {
+      console.error('Authentication error:', err);
+      toast.error('Failed to create account. Please try again.');
     } finally {
       setIsLoading(false);
     }

@@ -456,15 +456,13 @@ export function CameraDetail({ camera }: CameraDetailProps) {
                       <Button
                         variant="destructive"
                         size="sm"
-                        onClick={() => {
+                        onClick={async () => {
                           if (!confirm('Remove this camera? This cannot be undone.')) return;
                           try {
-                            const raw = localStorage.getItem('camio:cameras');
-                            const list = raw ? JSON.parse(raw) as any[] : [];
+                            const { loadCameras, saveCameras } = await import('@/lib/storage');
+                            const list = loadCameras();
                             const filtered = list.filter((c) => c.id !== camera.id);
-                            localStorage.setItem('camio:cameras', JSON.stringify(filtered));
-                            window.dispatchEvent(new Event('camio:cameras:updated'));
-                            // Navigate back to dashboard
+                            saveCameras(filtered);
                             window.location.href = '/dashboard';
                           } catch (e) {
                             console.error('Failed to remove camera', e);
@@ -494,17 +492,15 @@ export function CameraDetail({ camera }: CameraDetailProps) {
               <h3 className="font-medium mb-4">Recording Controls</h3>
               <p className="text-sm text-muted-foreground mb-3">The camera is {camera.status === 'online' ? 'online' : 'offline'} and {camera.isRecording ? 'recording' : 'not recording'}.</p>
               <div className="flex justify-center gap-2">{/* centered controls */}
-                <Button onClick={() => {
+                <Button onClick={async () => {
                   // toggle recording state in localStorage
                   try {
-                    const raw = localStorage.getItem('camio:cameras');
-                    const list = raw ? JSON.parse(raw) as any[] : [];
+                    const { loadCameras, saveCameras } = await import('@/lib/storage');
+                    const list = loadCameras();
                     const idx = list.findIndex((c) => c.id === camera.id);
                     if (idx !== -1) {
                       list[idx].isRecording = !list[idx].isRecording;
-                      localStorage.setItem('camio:cameras', JSON.stringify(list));
-                      window.dispatchEvent(new Event('camio:cameras:updated'));
-                      // reload to reflect change
+                      saveCameras(list);
                       window.location.reload();
                     }
                   } catch (e) {

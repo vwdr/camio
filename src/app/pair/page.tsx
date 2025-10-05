@@ -34,10 +34,10 @@ export default function PairPage() {
       setIsPaired(true);
       toast.success("Device paired successfully!");
       
-      // Automatically redirect after successful pairing
+      // Redirect to camera streaming page for external devices
       setTimeout(() => {
-        router.push("/dashboard");
-      }, 3000);
+        router.push("/cameras/stream?external=true&camera=" + encodeURIComponent(name || 'External Camera'));
+      }, 2000);
     } catch (error) {
       toast.error("Failed to pair device. Please try again.");
       console.error("Pairing error:", error);
@@ -74,11 +74,11 @@ export default function PairPage() {
             <h2 className="text-2xl font-bold">Device Paired!</h2>
             
             <p className="text-gray-400">
-              Your device has been successfully paired as "{name}".
+              Your device "{name}" is now ready to stream.
             </p>
             
             <p className="text-sm text-gray-500">
-              Redirecting to dashboard...
+              Redirecting to camera...
             </p>
           </div>
         ) : (

@@ -7,6 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { PlusCircle, AlertTriangle } from "lucide-react";
 import { motion } from "framer-motion";
+import { loadCameras, Camera as StorageCamera } from "@/lib/storage";
 
 // Metadata is now defined in layout.tsx for client components
 
@@ -39,30 +40,23 @@ interface Alert {
 const recentAlert: Alert | null = null;
 
 export default function DashboardPage() {
-  const [cameras, setCameras] = useState<Camera[]>([]);
+  const [cameras, setCameras] = useState<StorageCamera[]>([]);
 
-  // Load cameras from localStorage on mount
+  // Load cameras from storage on mount
   useEffect(() => {
     try {
-      const raw = localStorage.getItem('camio:cameras');
-      if (raw) {
-        const parsed = JSON.parse(raw) as Camera[];
-        setCameras(parsed);
-      } else {
-        setCameras([]);
-      }
+      setCameras(loadCameras());
     } catch (e) {
-      console.error('Failed to load cameras from localStorage', e);
+      console.error('Failed to load cameras from storage', e);
       setCameras([]);
     }
 
     // Listen for updates when other parts of the app dispatch an event
     const handler = () => {
       try {
-        const raw = localStorage.getItem('camio:cameras');
-        setCameras(raw ? (JSON.parse(raw) as Camera[]) : []);
+        setCameras(loadCameras());
       } catch (e) {
-        console.error('Failed to refresh cameras from localStorage', e);
+        console.error('Failed to refresh cameras from storage', e);
       }
     };
 

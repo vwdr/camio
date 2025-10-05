@@ -2,10 +2,11 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
+import { toast } from "sonner";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,6 +29,32 @@ import {
 export default function DashboardHeader() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const pathname = usePathname();
+  const router = useRouter();
+
+  const handleLogout = async () => {
+    try {
+      const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+      
+      if (!isSupabaseConfigured) {
+        toast.error('Authentication not configured');
+        return;
+      }
+      
+      const { error } = await supabase.auth.signOut();
+      
+      if (error) {
+        console.error('Logout error:', error);
+        toast.error('Failed to log out. Please try again.');
+        return;
+      }
+      
+      toast.success('Logged out successfully');
+      router.push('/sign-in');
+    } catch (err) {
+      console.error('Logout error:', err);
+      toast.error('Failed to log out. Please try again.');
+    }
+  };
 
   const navigation = [
     {
@@ -189,7 +216,7 @@ export default function DashboardHeader() {
                 <span>Support</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem>
+              <DropdownMenuItem onClick={handleLogout}>
                 <LogOut className="mr-2 h-4 w-4" />
                 <span>Log out</span>
               </DropdownMenuItem>

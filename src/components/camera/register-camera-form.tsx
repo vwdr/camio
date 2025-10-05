@@ -22,6 +22,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CameraIcon, Smartphone, Monitor, Info, Copy } from "lucide-react";
+import { addCamera } from "@/lib/storage";
 
 // Form schema with validation
 const formSchema = z.object({
@@ -36,6 +37,7 @@ type FormValues = z.infer<typeof formSchema>;
 export function RegisterCameraForm() {
   const [isLoading, setIsLoading] = useState(false);
   const [qrCode, setQrCode] = useState<string | null>(null);
+  const [lanBaseUrl, setLanBaseUrl] = useState<string | null>(null);
   const [uniqueToken, setUniqueToken] = useState<string>("");
   const [activeTab, setActiveTab] = useState("smartphone");
   const router = useRouter();
@@ -72,6 +74,21 @@ export function RegisterCameraForm() {
     },
   });
 
+  useEffect(() => {
+    // Fetch LAN-aware base URL once on mount
+    const fetchBase = async () => {
+      try {
+        const res = await fetch('/api/base-url');
+        if (!res.ok) throw new Error('Failed to resolve base URL');
+        const data = await res.json();
+        setLanBaseUrl(data.baseUrl || null);
+      } catch (e) {
+        setLanBaseUrl(null);
+      }
+    };
+    fetchBase();
+  }, []);
+
   // Generate QR code for external device registration
   const generateQrCode = () => {
     if (!form.getValues("name")) {
@@ -79,21 +96,20 @@ export function RegisterCameraForm() {
       return;
     }
     
-    // Generate a proper pairing URL using localhost
-    const pairingUrl = `http://localhost:3000/pair?token=${uniqueToken}&name=${encodeURIComponent(form.getValues("name"))}`;
+    // Try to get the current host (supports localhost, network IP, and deployed URLs)
+    const baseUrl = lanBaseUrl ?? (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.host}` : 'http://localhost:3000');
+    const pairingUrl = `${baseUrl}/pair?token=${uniqueToken}&name=${encodeURIComponent(form.getValues("name"))}`;
     setQrCode(pairingUrl);
     
     // Copy the pairing URL to clipboard
     navigator.clipboard.writeText(pairingUrl).then(() => {
-      toast.info("Pairing link copied to clipboard. Scan the QR code or share the link with your device.", { duration: 5000 });
+      toast.success("Pairing link copied to clipboard!");
+    }).catch(() => {
+      toast.error("Failed to copy to clipboard");
     });
   };
   
-  // Copy the pairing token
-  const copyPairingToken = () => {
-    navigator.clipboard.writeText(uniqueToken);
-    toast.success("Pairing token copied to clipboard");
-  };
+
 
   // Handle form submission
   async function onSubmit(values: FormValues) {
@@ -110,83 +126,65 @@ export function RegisterCameraForm() {
       
       console.log('Registering camera:', submission);
       
-      // Persist the camera to localStorage so the dashboard can load it
-      const id = `camio-${Math.random().toString(36).substring(2, 10)}`;
-      const newCamera = {
-        id,
+      // Use the new storage system
+      const newCamera = addCamera({
         name: values.name,
         location: values.deviceType === 'current' ? 'This Device' : 'External Device',
-        // Default to online and actively recording per request
         status: 'online',
         isRecording: true,
-        // Mark cameras created from this browser as local so we can access device
         isLocal: values.deviceType === 'current',
         lastActivity: new Date().toISOString(),
         hasSecurity: false,
         thumbnailUrl: undefined,
-        registeredAt: new Date().toISOString(),
         token: uniqueToken,
-      };
+      });
 
-      try {
-        const raw = localStorage.getItem('camio:cameras');
-        const existing = raw ? (JSON.parse(raw) as any[]) : [];
-        existing.unshift(newCamera);
-        localStorage.setItem('camio:cameras', JSON.stringify(existing));
+      toast.success("Camera registered successfully!");
 
-        // Notify other parts of the app (dashboard) to refresh
-        window.dispatchEvent(new Event('camio:cameras:updated'));
-
-        toast.success("Camera registered successfully!");
-
-        // If this is the current device, try to capture a short sample recording immediately
-        if (values.deviceType === 'current') {
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            const recorder = new MediaRecorder(stream);
-            const chunks: Blob[] = [];
-            recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-            recorder.onstop = async () => {
-              const blob = new Blob(chunks, { type: 'video/webm' });
-              // Try to save recording to IndexedDB to avoid localStorage quota issues
+      // If this is the current device, try to capture a short sample recording immediately
+      if (values.deviceType === 'current') {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          const recorder = new MediaRecorder(stream);
+          const chunks: Blob[] = [];
+          recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+          recorder.onstop = async () => {
+            const blob = new Blob(chunks, { type: 'video/webm' });
+            // Try to save recording to IndexedDB to avoid localStorage quota issues
+            try {
+              const { saveRecording } = await import('@/lib/recordings');
+              await saveRecording(newCamera.id, blob);
+              window.dispatchEvent(new CustomEvent('camio:recordings:updated', { detail: { cameraId: newCamera.id } }));
+            } catch (e) {
+              // Fallback: store a data URL in localStorage (may hit quota)
               try {
-                const { saveRecording } = await import('@/lib/recordings');
-                await saveRecording(id, blob);
-                window.dispatchEvent(new CustomEvent('camio:recordings:updated', { detail: { cameraId: id } }));
-              } catch (e) {
-                // Fallback: store a data URL in localStorage (may hit quota)
-                try {
-                  const reader = new FileReader();
-                  reader.onload = () => {
-                    try {
-                      const dataUrl = reader.result as string;
-                      const key = `camio:recordings:${id}`;
-                      const rawR = localStorage.getItem(key);
-                      const arr = rawR ? JSON.parse(rawR) as string[] : [];
-                      arr.unshift(dataUrl);
-                      localStorage.setItem(key, JSON.stringify(arr.slice(0,5)));
-                      window.dispatchEvent(new CustomEvent('camio:recordings:updated', { detail: { cameraId: id } }));
-                    } catch (e2) {
-                      console.error('Failed to save initial recording to localStorage', e2);
-                    }
-                  };
-                  reader.readAsDataURL(blob);
-                } catch (e2) {
-                  console.error('Failed to store initial recording', e2);
-                }
+                const reader = new FileReader();
+                reader.onload = () => {
+                  try {
+                    const dataUrl = reader.result as string;
+                    const key = `camio:recordings:${newCamera.id}`;
+                    const rawR = localStorage.getItem(key);
+                    const arr = rawR ? JSON.parse(rawR) as string[] : [];
+                    arr.unshift(dataUrl);
+                    localStorage.setItem(key, JSON.stringify(arr.slice(0,5)));
+                    window.dispatchEvent(new CustomEvent('camio:recordings:updated', { detail: { cameraId: newCamera.id } }));
+                  } catch (e2) {
+                    console.error('Failed to save initial recording to localStorage', e2);
+                  }
+                };
+                reader.readAsDataURL(blob);
+              } catch (e2) {
+                console.error('Failed to store initial recording', e2);
               }
-              // stop tracks
-              stream.getTracks().forEach(t => t.stop());
-            };
-            recorder.start();
-            setTimeout(() => { if (recorder.state !== 'inactive') recorder.stop(); }, 6000);
-          } catch (e) {
-            console.warn('Could not auto-capture from device at registration', e);
-          }
+            }
+            // stop tracks
+            stream.getTracks().forEach(t => t.stop());
+          };
+          recorder.start();
+          setTimeout(() => { if (recorder.state !== 'inactive') recorder.stop(); }, 6000);
+        } catch (e) {
+          console.warn('Could not auto-capture from device at registration', e);
         }
-      } catch (e) {
-        console.error('Failed to persist camera to localStorage', e);
-        toast.error('Failed to save camera locally');
       }
       
       // Generate the QR code after successful registration for external devices
@@ -260,12 +258,27 @@ export function RegisterCameraForm() {
                     </p>
                   </div>
                   
-                  <div className="flex items-center space-x-2">
-                    <div className="font-mono text-xs bg-muted p-2 rounded flex-1">
-                      {uniqueToken}
+                  {/* Network Access Information */}
+                  <div className="bg-amber-50 border border-amber-200 rounded-md p-3 space-y-2">
+                    <div className="flex items-center space-x-2">
+                      <Info className="h-4 w-4 text-amber-600" />
+                      <p className="text-sm font-medium text-amber-800">Network Access Required</p>
                     </div>
-                    <Button variant="outline" size="sm" onClick={copyPairingToken}>
-                      <Copy className="h-4 w-4" />
+                    <div className="text-sm text-amber-700 space-y-1">
+                      <p>• Ensure both devices are on the same WiFi network</p>
+                      <p>• For external access, consider using ngrok or deploy to production</p>
+                      <p>• Current URL: {lanBaseUrl ?? (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000')}</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex justify-center">
+                    <Button 
+                      type="button"
+                      onClick={generateQrCode}
+                      variant="outline"
+                      disabled={!form.watch("name")}
+                    >
+                      Generate QR Code
                     </Button>
                   </div>
                 </motion.div>
@@ -293,9 +306,36 @@ export function RegisterCameraForm() {
             </motion.div>
           </div>
         
-          <motion.div variants={fadeIn} className="flex justify-between items-center pt-4">
-            <div>
+          <motion.div variants={fadeIn} className="flex flex-col-reverse md:flex-row md:justify-between items-center gap-4 pt-4">
+            <div className="flex-1 flex justify-center">
               {/* QR code will appear here when generated */}
+              {qrCode && (
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.95 }} 
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ type: "spring", stiffness: 200, damping: 15 }}
+                  className="w-full max-w-md bg-white rounded-lg p-4 shadow-md"
+                >
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="bg-white p-2 rounded-md">
+                      <QRCodeSVG value={qrCode} size={180} />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-sm text-muted-foreground">
+                        Scan this code with your device to connect.
+                      </p>
+                      <a 
+                        href={qrCode}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block text-sm text-primary underline mt-2 truncate max-w-xs"
+                      >
+                        {qrCode}
+                      </a>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
             </div>
             
             <Button 
@@ -312,36 +352,8 @@ export function RegisterCameraForm() {
                   <CameraIcon className="h-4 w-4" />
                 </motion.div>
               )}
-              {qrCode ? "Generate New Code" : "Register Camera"}
+              Register Camera
             </Button>
-            
-            {qrCode && (
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.95 }} 
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ type: "spring", stiffness: 200, damping: 15 }}
-                className="w-full max-w-md bg-white rounded-lg p-4 shadow-md"
-              >
-                <div className="flex flex-col items-center gap-3">
-                  <div className="bg-white p-2 rounded-md">
-                    <QRCodeSVG value={qrCode} size={160} />
-                  </div>
-                  <div className="text-center">
-                    <p className="text-sm text-muted-foreground">
-                      Scan this code with your device to connect.
-                    </p>
-                    <a 
-                      href={qrCode}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block text-sm text-primary underline mt-2 truncate max-w-xs"
-                    >
-                      {qrCode}
-                    </a>
-                  </div>
-                </div>
-              </motion.div>
-            )}
           </motion.div>
         </form>
       </motion.div>

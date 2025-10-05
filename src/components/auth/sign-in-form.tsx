@@ -41,27 +41,46 @@ export default function SignInForm() {
     },
   });
 
-  // Handle form submission
+  // Handle form submission using Supabase
   async function onSubmit(values: z.infer<typeof formSchema>) {
     setIsLoading(true);
-    
-    try {
-      // In a real application, we would call the Supabase auth API here
-      // const { error } = await supabaseClient.auth.signInWithPassword({
-      //   email: values.email,
-      //   password: values.password,
-      // });
 
-      // if (error) throw error;
-      
-      // Simulate successful login for now
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      toast.success("Signed in successfully!");
-      router.push("/dashboard");
-    } catch (error) {
-      console.error("Authentication error:", error);
-      toast.error("Failed to sign in. Please check your credentials.");
+    try {
+      const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+
+      if (!isSupabaseConfigured) {
+        toast.error('Auth is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local and restart the dev server.');
+        return;
+      }
+
+      const { error, data } = await supabase.auth.signInWithPassword({
+        email: values.email,
+        password: values.password,
+      });
+
+      if (error) {
+        console.error('Sign in failed:', error);
+        // Provide more specific error messages
+        if (error.message.includes('Email not confirmed')) {
+          toast.error('Please check your email and click the confirmation link before signing in.');
+        } else if (error.message.includes('Invalid login credentials')) {
+          toast.error('Invalid email or password. Please check your credentials.');
+        } else {
+          toast.error(error.message || 'Failed to sign in. Please check your credentials.');
+        }
+        return;
+      }
+
+      if (data?.session || data?.user) {
+        toast.success('Signed in successfully!');
+        router.push('/dashboard');
+      } else {
+        toast.success('Sign-in initiated. If your account requires confirmation, check your email.');
+        router.push('/dashboard');
+      }
+    } catch (err) {
+      console.error('Authentication error:', err);
+      toast.error('Failed to sign in. Please try again.');
     } finally {
       setIsLoading(false);
     }

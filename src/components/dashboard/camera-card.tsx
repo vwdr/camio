@@ -5,7 +5,7 @@ import { useEffect, useRef } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { motion } from "framer-motion";
-import { acquireStream, releaseStream, attachStreamToElement, getExistingStream } from '@/lib/localStream';
+import { acquireStream, releaseStream } from '@/lib/localStream';
 import { getRecordings, saveRecording } from '@/lib/recordings';
 import { useVideoAnalyzer } from '@/lib/useVideoAnalyzer';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -84,16 +84,11 @@ export function CameraCard({ camera }: CameraCardProps) {
   const startPreviewIfNeeded = async () => {
       if (camera.isLocal && camera.isRecording && !recordingUrl && !mediaStreamRef.current) {
         try {
-          const acquired = await attachStreamToElement(videoRef.current as HTMLVideoElement, camera.id, { video: true, audio: true });
-          // if attachStreamToElement returned true it means this caller acquired the stream
-          if (acquired) {
-            currentStreamCameraId.current = camera.id;
-            // mark mediaStreamRef from global manager
-            mediaStreamRef.current = getExistingStream(camera.id) as MediaStream | null;
-          } else {
-            mediaStreamRef.current = getExistingStream(camera.id) as MediaStream | null;
-          }
+          const stream = await acquireStream(camera.id);
+          mediaStreamRef.current = stream;
+          currentStreamCameraId.current = camera.id;
           if (videoRef.current) {
+            videoRef.current.srcObject = stream;
             try { await videoRef.current.play(); } catch (e) { /* ignore */ }
             setIsLocalStreaming(true);
           }
@@ -105,22 +100,10 @@ export function CameraCard({ camera }: CameraCardProps) {
 
   startPreviewIfNeeded();
 
-    // monitor video for stalls and try reattach
-    let mon: number | undefined;
-    if (videoRef.current) {
-      mon = window.setInterval(() => {
-        const v = videoRef.current as HTMLVideoElement | null;
-        if (!v) return;
-        if (v.readyState < 2 || v.videoWidth === 0 || v.videoHeight === 0) {
-          try { attachStreamToElement(v, camera.id, { video: true, audio: true }); } catch (e) {}
-        }
-      }, 1000);
-    }
-
     return () => {
       mounted = false;
       if (recordingUrl && recordingUrl.startsWith('blob:')) URL.revokeObjectURL(recordingUrl);
-      if (mediaStreamRef.current) {
+  if (mediaStreamRef.current) {
         try {
           if (currentStreamCameraId.current) releaseStream(currentStreamCameraId.current as string);
         } catch (e) {
@@ -130,9 +113,8 @@ export function CameraCard({ camera }: CameraCardProps) {
           currentStreamCameraId.current = null;
         }
       }
-      if (mon) clearInterval(mon);
     };
-  }, [camera.id, camera.isLocal, camera.isRecording, recordingUrl]);
+  }, [camera.id]);
 
   // start/stop analyzer when videoRef and canvasRef are available
   useEffect(() => {
@@ -478,34 +460,7 @@ export function CameraCard({ camera }: CameraCardProps) {
       </CardContent>
       <CardFooter className="flex justify-between p-4">
         <div>
-          {camera.isLocal ? (
-            <Button variant="destructive" size="sm" onClick={async () => {
-              // stop recording and update camera state in localStorage
-              try {
-                stopLocalRecording();
-                // also release any shared preview stream
-                try {
-                  releaseStream(camera.id);
-                } catch (e) {
-                  // ignore
-                }
-                const raw = localStorage.getItem('camio:cameras');
-                const list = raw ? JSON.parse(raw) as any[] : [];
-                const idx = list.findIndex((c) => c.id === camera.id);
-                if (idx !== -1) {
-                  list[idx].isRecording = false;
-                  localStorage.setItem('camio:cameras', JSON.stringify(list));
-                  window.dispatchEvent(new Event('camio:cameras:updated'));
-                }
-              } catch (e) {
-                console.error('Failed to stop camera', e);
-              }
-            }}>
-              Stop
-            </Button>
-          ) : (
-            <div className="text-sm text-muted-foreground">{camera.location}</div>
-          )}
+          <div className="text-sm text-muted-foreground">{camera.location}</div>
         </div>
         <Link href={`/cameras/${camera.id}`}>
           <motion.div

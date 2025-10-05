@@ -14,40 +14,57 @@ export default function StreamCameraPage() {
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<string>("stream");
   
-  // Check for connect parameter to determine if we're viewing a shared stream
+  // Check for external device parameter to start streaming immediately
   useEffect(() => {
+    const isExternal = searchParams?.get("external");
     const connectParam = searchParams?.get("connect");
-    if (connectParam) {
+    
+    if (isExternal === "true") {
+      // External device should start streaming immediately
+      setActiveTab("stream");
+    } else if (connectParam) {
       setActiveTab("view");
     }
   }, [searchParams]);
+  
+  const cameraName = searchParams?.get("camera") || "External Camera";
+  const isExternal = searchParams?.get("external") === "true";
   
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center">
-          <Link href="/dashboard">
-            <Button variant="ghost" size="icon" className="mr-2">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+          {!isExternal && (
+            <Link href="/dashboard">
+              <Button variant="ghost" size="icon" className="mr-2">
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
+            </Link>
+          )}
           <h2 className="text-3xl font-bold tracking-tight">
-            {activeTab === "stream" ? "Stream Camera" : "View Camera Stream"}
+            {isExternal 
+              ? `Streaming: ${cameraName}` 
+              : activeTab === "stream" 
+                ? "Stream Camera" 
+                : "View Camera Stream"
+            }
           </h2>
         </div>
       </div>
       
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full max-w-md grid-cols-2">
-          <TabsTrigger value="stream" className="flex items-center gap-2">
-            <Video className="h-4 w-4" />
-            Stream Camera
-          </TabsTrigger>
-          <TabsTrigger value="view" className="flex items-center gap-2">
-            <Eye className="h-4 w-4" />
-            View Stream
-          </TabsTrigger>
-        </TabsList>
+        {!isExternal && (
+          <TabsList className="grid w-full max-w-md grid-cols-2">
+            <TabsTrigger value="stream" className="flex items-center gap-2">
+              <Video className="h-4 w-4" />
+              Stream Camera
+            </TabsTrigger>
+            <TabsTrigger value="view" className="flex items-center gap-2">
+              <Eye className="h-4 w-4" />
+              View Stream
+            </TabsTrigger>
+          </TabsList>
+        )}
         
         <TabsContent value="stream" className="mt-4">
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
