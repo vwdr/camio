@@ -6,13 +6,13 @@ import { Card, CardContent } from "@/components/ui/card";
 import { 
   Camera, 
   Volume2,
-  VolumeX,
-  Loader2
+  VolumeX
 } from "lucide-react";
 import { toast } from "sonner";
-import { supabase } from '@/lib/supabase/client';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import { SignalingServer } from '@/lib/webrtc/signaling-server';
 import { PeerConnection } from '@/lib/webrtc/peer-connection';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 export function CameraViewer() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -38,12 +38,30 @@ export function CameraViewer() {
 
     setIsLoading(true);
 
+    if (!isSupabaseConfigured) {
+      toast.error('Remote viewing is disabled: Supabase signaling is not configured.');
+      setIsLoading(false);
+      return;
+    }
+
     (async () => {
       try {
         const viewerId = `viewer-${Math.random().toString(36).substring(2, 12)}`;
-        const ss = new SignalingServer(supabase, viewerId);
+        const supabaseClient = supabase as SupabaseClient;
+
+        // Tear down any existing signaling session before creating a new one
+        if (signaling) {
+          try { signaling.disconnect(); } catch (err) { console.warn('Failed to disconnect previous signaling session', err); }
+        }
+
+        const ss = new SignalingServer(supabaseClient, viewerId);
         await ss.connect();
         setSignaling(ss);
+
+        if (pcRef.current) {
+          try { pcRef.current.close(); } catch (err) { console.warn('Failed to close previous peer connection', err); }
+          pcRef.current = null;
+        }
 
         const pc = new PeerConnection(ss, undefined, {
           onError: (e) => { console.error('Viewer PC error', e); toast.error('Connection error'); },

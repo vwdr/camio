@@ -106,7 +106,9 @@ export function CameraDetail({ camera }: CameraDetailProps) {
         if (msg.type === 'streamer-info' && isRecord(msg.data) && 'streamId' in msg.data) {
           const payload = msg.data as Record<string, unknown>;
           const streamId = String(payload.streamId);
-          const hasStream = Boolean(payload.hasStream);
+          const hasStream = payload.isStreaming === true
+            || payload.hasStream === true
+            || payload.hasStream === 'true';
           streamerTargetRef.current = streamId;
           lastKnownStreamId = streamId;
           lastHasStream = hasStream;
@@ -154,33 +156,41 @@ export function CameraDetail({ camera }: CameraDetailProps) {
 
   const waitForStreamerReady = async (ss: SignalingServer): Promise<string | null> => {
     let attempt = 0;
+    let fallbackId: string | null = null;
     while (componentActiveRef.current) {
       const info = await resolveStreamerTarget(ss);
       if (!componentActiveRef.current) {
-        return null;
+        return fallbackId;
       }
 
       if (!info) {
-        return null;
+        return fallbackId;
       }
 
       const { streamId, hasStream } = info;
       streamerTargetRef.current = streamId;
+      fallbackId = streamId;
 
       if (hasStream) {
+        console.log('✅ Streamer is ready and broadcasting, streamId:', streamId);
         return streamId;
       }
 
       if (attempt === 0) {
-        console.log('Streamer responded but is not streaming yet; waiting for broadcast to start...');
+        console.log('⏸️ Streamer responded but is not streaming yet; waiting for broadcast to start...');
       }
       attempt += 1;
+
+      if (attempt >= 3) {
+        console.log('⚠️ Streamer keeps reporting idle; attempting to connect anyway with latest stream ID:', streamId);
+        return streamId;
+      }
 
       // Wait briefly before requesting status again
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
 
-    return null;
+    return fallbackId;
   };
 
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
@@ -224,7 +234,7 @@ export function CameraDetail({ camera }: CameraDetailProps) {
 
     try {
       const viewerId = `viewer-${Math.random().toString(36).substring(2, 10)}`;
-  const ss = new SignalingServer(supabase as SupabaseClient, viewerId);
+      const ss = new SignalingServer(supabase as SupabaseClient, viewerId);
       await ss.connect();
       if (!componentActiveRef.current) {
         ss.disconnect();
@@ -232,21 +242,10 @@ export function CameraDetail({ camera }: CameraDetailProps) {
       }
       signalingRef.current = ss;
 
-      const resolvedStreamId = await waitForStreamerReady(ss);
-      if (!componentActiveRef.current) {
-        ss.disconnect();
-        return;
-      }
-
-      if (!resolvedStreamId) {
-        console.warn('Unable to determine streamer target for camera', camera.id);
-        setViewerState('error');
-        ss.disconnect();
-        return;
-      }
-
+      console.log('🔗 Creating viewer peer connection for camera', camera.id);
       const peer = new PeerConnection(ss, undefined, {
         onConnectionStateChange: (state) => {
+          console.log('📡 Viewer connection state changed to:', state);
           if (state === 'connected') {
             setViewerState('connected');
             reconnectAttemptsRef.current = 0;
@@ -300,10 +299,33 @@ export function CameraDetail({ camera }: CameraDetailProps) {
 
       pcRef.current = peer;
 
+      console.log('🔍 Waiting for streamer to be ready...');
+      const resolvedStreamId = await waitForStreamerReady(ss);
+      if (!componentActiveRef.current) {
+        console.log('❌ Component unmounted during wait, cleaning up');
+        peer.close();
+        ss.disconnect();
+        signalingRef.current = null;
+        pcRef.current = null;
+        return;
+      }
+
+      if (!resolvedStreamId) {
+        console.warn('❌ Unable to determine streamer target for camera', camera.id);
+        setViewerState('error');
+        peer.close();
+        signalingRef.current = null;
+        pcRef.current = null;
+        ss.disconnect();
+        return;
+      }
+
+      console.log('🎯 Initializing viewer with streamer ID:', resolvedStreamId);
       try {
         await peer.initializeAsViewer(resolvedStreamId);
+        console.log('✅ Viewer initialized successfully');
       } catch (connectionError) {
-        console.error('Failed to initialize viewer peer connection:', connectionError);
+        console.error('❌ Failed to initialize viewer peer connection:', connectionError);
         setViewerState('error');
         if (reconnectAttemptsRef.current < 5 && camera.status === 'online') {
           setTimeout(() => {

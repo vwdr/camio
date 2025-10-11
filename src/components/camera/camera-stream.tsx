@@ -78,6 +78,9 @@ export function CameraStream() {
   const signalingRef = useRef<SignalingServer | null>(null);
   const peerConnectionRef = useRef<PeerConnection | null>(null);
   const infoResponderAttachedRef = useRef(false);
+  const activeViewerRef = useRef<string | null>(null);
+  const offerInFlightViewerRef = useRef<string | null>(null);
+  const lastOfferTimestampRef = useRef<number>(0);
   
   // External device parameters
   const tokenParam = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('token') : null;
@@ -103,6 +106,49 @@ export function CameraStream() {
     isStreamingRef.current = isStreaming;
   }, [isStreaming]);
 
+  const maybeOfferViewer = async (viewerId: string | null) => {
+    if (!viewerId) {
+      console.log('⚠️ maybeOfferViewer called with no viewerId');
+      return;
+    }
+
+    const peer = peerConnectionRef.current;
+    const stream = streamRef.current;
+
+    if (!peer || !stream) {
+      console.log('⚠️ Cannot offer - peer:', !!peer, 'stream:', !!stream);
+      return;
+    }
+
+    const now = Date.now();
+
+    if (offerInFlightViewerRef.current === viewerId) {
+      console.log('⏳ Offer already in flight for', viewerId);
+      return;
+    }
+
+    if (activeViewerRef.current === viewerId && now - lastOfferTimestampRef.current < 3000) {
+      console.log('⏱️ Offer sent recently to', viewerId, '- skipping');
+      return;
+    }
+
+    console.log('🚀 Sending offer to viewer', viewerId);
+    offerInFlightViewerRef.current = viewerId;
+    lastOfferTimestampRef.current = now;
+
+    try {
+      await peer.initializeAsStreamer(stream, viewerId);
+      activeViewerRef.current = viewerId;
+      console.log('✅ Successfully sent offer to viewer', viewerId);
+    } catch (err) {
+      console.error('❌ Failed to initialize streamer for viewer', viewerId, err);
+    } finally {
+      if (offerInFlightViewerRef.current === viewerId) {
+        offerInFlightViewerRef.current = null;
+      }
+    }
+  };
+
   const ensureSignalingConnection = async (): Promise<SignalingServer | null> => {
     if (!isSupabaseConfigured) {
       return null;
@@ -121,13 +167,33 @@ export function CameraStream() {
             return;
           }
 
+          console.log('📩 Received streamer-info-request from', msg.sender);
+
           try {
+            const viewerId = msg.data.viewerId || msg.sender;
+            
+            // Check if we're truly ready: have stream, peer connection, and peer has local stream set
+            const peerReady = Boolean(
+              peerConnectionRef.current && 
+              streamRef.current &&
+              isStreamingRef.current
+            );
+            
             const payload: Record<string, unknown> = {
               streamId,
-              isStreaming: isStreamingRef.current,
-              hasStream: Boolean(streamRef.current),
+              isStreaming: peerReady,
+              hasStream: peerReady,
             };
             await ss.sendMessage(msg.sender, 'streamer-info', payload);
+            console.log('📤 Sent streamer-info response:', payload);
+            
+            // Proactively send offer if we're ready
+            if (peerReady) {
+              console.log('🎬 Attempting to send proactive offer to viewer', viewerId);
+              void maybeOfferViewer(viewerId ?? msg.sender);
+            } else {
+              console.log('⏸️ Not ready to send offer - streaming:', isStreamingRef.current, 'stream:', !!streamRef.current, 'peer:', !!peerConnectionRef.current);
+            }
           } catch (err) {
             console.warn('Failed to respond to streamer-info-request:', toError(err));
           }
@@ -181,6 +247,10 @@ export function CameraStream() {
       signalingErrorShownRef.current = false;
       infoResponderAttachedRef.current = false;
     }
+
+    activeViewerRef.current = null;
+    offerInFlightViewerRef.current = null;
+    lastOfferTimestampRef.current = 0;
   };
 
   const setupRemoteStreaming = async (mediaStream: MediaStream) => {
@@ -192,6 +262,7 @@ export function CameraStream() {
     const ss = await ensureSignalingConnection();
     if (!ss) return;
 
+    // Close any existing peer connection before creating a new one
     if (peerConnectionRef.current) {
       const existingViewer = peerConnectionRef.current.getRemoteUserId();
       if (existingViewer) {
@@ -207,15 +278,19 @@ export function CameraStream() {
         console.error('Error closing previous peer connection:', err);
       }
       peerConnectionRef.current = null;
+      activeViewerRef.current = null;
     }
 
+    // Create peer connection that will handle both info requests and viewer-connect messages
     const peer = new PeerConnection(ss, undefined, {
       onConnectionStateChange: (state) => {
         if (state === 'connected') {
-          console.log('Viewer connected to stream');
+          console.log('✅ Viewer connected to stream');
+          activeViewerRef.current = peerConnectionRef.current?.getRemoteUserId() ?? activeViewerRef.current;
         }
         if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-          console.log('Viewer disconnected from stream');
+          console.log('❌ Viewer disconnected from stream');
+          activeViewerRef.current = null;
         }
       },
       onError: (error) => {
@@ -226,6 +301,7 @@ export function CameraStream() {
 
     peer.setLocalStream(mediaStream);
     peerConnectionRef.current = peer;
+    console.log('🎥 Streamer peer connection ready with local stream');
   };
 
   // Function to get available cameras
@@ -278,13 +354,20 @@ export function CameraStream() {
         registrationListenerAttachedRef.current = true;
       }
 
+      console.log('📤 Sending register-camera message:', {
+        to: tokenParam,
+        id: streamId,
+        name: cameraName,
+        token: streamId,
+      });
+
       await ss.sendMessage(tokenParam, 'register-camera', {
         id: streamId,
         name: cameraName,
         token: streamId,
       });
 
-      console.log('📡 Registration message sent to dashboard');
+      console.log('✅ Registration message sent to dashboard');
       toast.info('Registration request sent. Waiting for confirmation...');
 
     } catch (error) {
@@ -346,10 +429,19 @@ export function CameraStream() {
           videoRef.current.srcObject = mediaStream;
         }
         
+        console.log('📹 Local stream acquired, setting up remote streaming...');
+        console.log('State before setup - stream:', !!streamRef.current, 'peer:', !!peerConnectionRef.current, 'isStreaming:', isStreamingRef.current);
+        
+        await setupRemoteStreaming(mediaStream);
+        
+        console.log('State after setup - stream:', !!streamRef.current, 'peer:', !!peerConnectionRef.current, 'isStreaming:', isStreamingRef.current);
+        
+        // Update ref IMMEDIATELY before state to avoid race condition
+        isStreamingRef.current = true;
         setIsStreaming(true);
         toast.success("Camera streaming started");
-
-        await setupRemoteStreaming(mediaStream);
+        console.log('✅ Remote streaming setup complete, now accepting viewers');
+        console.log('Final state - stream:', !!streamRef.current, 'peer:', !!peerConnectionRef.current, 'isStreaming:', isStreamingRef.current);
 
         // For external devices, register with dashboard
         if (isExternal && tokenParam) {
@@ -437,21 +529,28 @@ export function CameraStream() {
     }
   };
   
-  // Clean up on unmount
+  // Clean up on unmount ONLY
   useEffect(() => {
     return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
+      const currentStream = streamRef.current;
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
       }
       streamRef.current = null;
       
-      if (mediaRecorderRef.current && isRecording) {
-        mediaRecorderRef.current.stop();
+      if (mediaRecorderRef.current) {
+        try {
+          mediaRecorderRef.current.stop();
+        } catch (e) {
+          // Already stopped
+        }
       }
 
       void teardownRemoteStreaming('Device navigated away');
     };
-  }, [stream, isRecording]);
+    // Empty deps = only run on mount/unmount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   
   // Switch camera
   const switchCamera = async () => {
@@ -531,7 +630,27 @@ export function CameraStream() {
           )}
           
           {isStreaming && (
-            <div className="absolute bottom-4 left-4 right-4 flex items-center justify-center space-x-2">
+            <>
+              {/* Status indicator at top */}
+              <div className="absolute top-4 left-4 right-4 flex flex-col items-start gap-2">
+                <div className="flex items-center gap-2 bg-black/70 px-3 py-2 rounded-full">
+                  <div className={`w-3 h-3 rounded-full ${peerConnectionRef.current ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`} />
+                  <span className="text-white text-sm font-medium">
+                    {peerConnectionRef.current ? 'Ready for Viewers' : 'Setting up...'}
+                  </span>
+                </div>
+                {/* Debug info - force re-render every second to show current state */}
+                <div className="bg-black/70 px-2 py-1 rounded text-white text-xs font-mono">
+                  Stream: {stream ? '✓' : '✗'} | Peer: {peerConnectionRef.current ? '✓' : '✗'} | State: {isStreaming ? 'ON' : 'OFF'}
+                </div>
+                {isExternal && registered && (
+                  <div className="bg-green-500/80 px-3 py-2 rounded-full">
+                    <span className="text-white text-xs font-medium">Registered ✓</span>
+                  </div>
+                )}
+              </div>
+              
+              <div className="absolute bottom-4 left-4 right-4 flex items-center justify-center space-x-2">
               <Button 
                 variant="outline" 
                 size="icon" 
@@ -607,6 +726,7 @@ export function CameraStream() {
                 )}
               </div>
             </div>
+            </>
           )}
         </div>
       </CardContent>

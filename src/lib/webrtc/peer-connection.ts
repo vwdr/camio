@@ -104,13 +104,20 @@ export class PeerConnection {
   private setupPeerConnectionListeners(): void {
     // Handle ICE candidates
     this.peerConnection.onicecandidate = (event) => {
-      if (event.candidate && this.remoteUserId) {
-        this.signaling.sendMessage(this.remoteUserId, 'ice-candidate', {
-          candidate: event.candidate
-        }).catch(error => {
-          console.error('Error sending ICE candidate:', error);
-          this.callbacks.onError?.(new Error(`Failed to send ICE candidate: ${error.message || String(error)}`));
-        });
+      if (event.candidate) {
+        console.log('🧊 Generated ICE candidate:', event.candidate.candidate.substring(0, 50) + '...');
+        if (this.remoteUserId) {
+          this.signaling.sendMessage(this.remoteUserId, 'ice-candidate', {
+            candidate: event.candidate
+          }).catch(error => {
+            console.error('Error sending ICE candidate:', error);
+            this.callbacks.onError?.(new Error(`Failed to send ICE candidate: ${error.message || String(error)}`));
+          });
+        } else {
+          console.warn('⚠️ ICE candidate generated but no remoteUserId set yet');
+        }
+      } else {
+        console.log('🧊 ICE gathering complete (null candidate)');
       }
     };
 
@@ -140,17 +147,27 @@ export class PeerConnection {
       }
     };
     
+    // Monitor ICE connection state separately
+    this.peerConnection.oniceconnectionstatechange = () => {
+      console.log('🧊 ICE connection state:', this.peerConnection.iceConnectionState);
+      if (this.peerConnection.iceConnectionState === 'connected' || this.peerConnection.iceConnectionState === 'completed') {
+        console.log('✅ ICE connection established!');
+      } else if (this.peerConnection.iceConnectionState === 'failed') {
+        console.error('❌ ICE connection failed!');
+      }
+    };
+    
     // Monitor ICE gathering state
     this.peerConnection.onicegatheringstatechange = () => {
-      console.log('ICE gathering state:', this.peerConnection.iceGatheringState);
+      console.log('🧊 ICE gathering state:', this.peerConnection.iceGatheringState);
     };
     
     // Monitor signaling state
     this.peerConnection.onsignalingstatechange = () => {
-      console.log('Signaling state:', this.peerConnection.signalingState);
+      console.log('📡 Signaling state:', this.peerConnection.signalingState);
       
       if (this.peerConnection.signalingState === 'closed') {
-        console.log('Signaling state closed');
+        console.log('❌ Signaling state closed');
       }
     };
   }
@@ -211,6 +228,12 @@ export class PeerConnection {
               this.handleStreamEnded('Stream ended by remote peer');
             }
             break;
+          case 'streamer-info':
+          case 'streamer-info-request':
+          case 'register-camera':
+          case 'register-ack':
+            // Ignore these - they're handled by higher-level components
+            break;
           default:
             console.log('Unknown message type:', message.type);
         }
@@ -222,27 +245,30 @@ export class PeerConnection {
   }
 
   private async handleViewerConnect(message: SignalingMessage): Promise<void> {
+    console.log('📨 Received viewer-connect message from', message.sender);
+    
     if (!this.localStream) {
-      console.warn('Received viewer-connect but no local stream is attached');
+      console.warn('⚠️ Received viewer-connect but no local stream is attached');
       return;
     }
 
     if (!isViewerConnectPayload(message.data)) {
-      console.warn('Viewer connect message missing payload');
+      console.warn('⚠️ Viewer connect message missing payload');
       return;
     }
 
     const requestedViewerId = message.data.viewerId || message.sender;
     if (!requestedViewerId) {
-      console.warn('Viewer connect message missing viewerId');
+      console.warn('⚠️ Viewer connect message missing viewerId');
       return;
     }
 
     try {
-      console.log('Received viewer-connect from', requestedViewerId);
+      console.log('🎥 Processing viewer-connect from', requestedViewerId, '- initializing as streamer');
       await this.initializeAsStreamer(this.localStream, requestedViewerId);
+      console.log('✅ Successfully initialized streamer for viewer', requestedViewerId);
     } catch (err) {
-      console.error('Failed to initialize streamer peer connection:', err);
+      console.error('❌ Failed to initialize streamer peer connection:', err);
       this.callbacks.onError?.(normalizeError(err));
     }
   }
@@ -251,13 +277,17 @@ export class PeerConnection {
    * Initialize WebRTC as the caller (camera streamer)
    */
   async initializeAsStreamer(localStream: MediaStream, remoteUserId: string): Promise<void> {
-    const needsReset = this.localTracksAdded ||
-      this.peerConnection.connectionState !== 'new' ||
-      this.peerConnection.signalingState !== 'stable' ||
-      (this.remoteUserId && this.remoteUserId !== remoteUserId);
+    console.log('🎬 initializeAsStreamer called for viewer:', remoteUserId);
+    console.log('Current state - connection:', this.peerConnection.connectionState, 'signaling:', this.peerConnection.signalingState);
+    console.log('Current remoteUserId:', this.remoteUserId, 'tracks added:', this.localTracksAdded);
+    
+    // Only reset if we're connecting to a DIFFERENT viewer or connection is completely broken
+    const needsReset = (this.remoteUserId && this.remoteUserId !== remoteUserId) ||
+      this.peerConnection.connectionState === 'failed' ||
+      this.peerConnection.connectionState === 'closed';
 
     if (needsReset) {
-      console.log('Resetting peer connection before creating new offer');
+      console.log('⚠️ Resetting peer connection - switching viewers or connection failed');
       this.recreatePeerConnection();
     }
 
@@ -453,26 +483,40 @@ export class PeerConnection {
    * Handle an incoming WebRTC offer
    */
   private async handleOffer(data: OfferPayload, sender: string): Promise<void> {
+    console.log('📥 Received offer from', sender);
+    console.log('Offer SDP type:', data.sdp.type, 'length:', data.sdp.sdp?.length);
+    
     this.remoteUserId = sender;
 
+    console.log('Setting remote description...');
     await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    console.log('✅ Remote description set');
+    
     await this.processIceCandidateQueue(); // Process any queued candidates
 
+    console.log('Creating answer...');
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
+    console.log('✅ Answer created and local description set');
 
     await this.signaling.sendMessage(this.remoteUserId, 'answer', {
       sdp: this.peerConnection.localDescription as RTCSessionDescriptionInit
     });
-    console.log('Sent SDP answer to streamer', this.remoteUserId);
+    console.log('📤 Sent SDP answer to streamer', this.remoteUserId);
   }
 
   /**
    * Handle an incoming WebRTC answer
    */
   private async handleAnswer(data: AnswerPayload): Promise<void> {
+    console.log('📥 Received answer from viewer');
+    console.log('Answer SDP type:', data.sdp.type, 'length:', data.sdp.sdp?.length);
+    
     await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    console.log('✅ Remote description (answer) set successfully');
+    
     await this.processIceCandidateQueue();
+    console.log('✅ Processed queued ICE candidates');
   }
 
   /**
@@ -480,17 +524,20 @@ export class PeerConnection {
    */
   private async handleIceCandidate(data: IceCandidatePayload): Promise<void> {
     const candidate = new RTCIceCandidate(data.candidate);
+    console.log('🧊 Received ICE candidate:', candidate.candidate?.substring(0, 50) + '...');
+    
     if (this.peerConnection.remoteDescription) {
       try {
         await this.peerConnection.addIceCandidate(candidate);
+        console.log('✅ Added ICE candidate');
       } catch (error) {
-        console.error('Error adding ICE candidate:', error);
+        console.error('❌ Error adding ICE candidate:', error);
         const normalized = normalizeError(error);
         this.callbacks.onError?.(new Error(`Failed to add ICE candidate: ${normalized.message}`));
       }
     } else {
       this.iceCandidateQueue.push(candidate);
-      console.log('Queued ICE candidate, remote description not set yet.');
+      console.log('📦 Queued ICE candidate (remote description not set yet), queue size:', this.iceCandidateQueue.length);
     }
   }
 

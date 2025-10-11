@@ -25,6 +25,8 @@ import { CameraIcon, Smartphone, Monitor, Info, Copy } from "lucide-react";
 import { addCamera } from "@/lib/storage";
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import { SignalingServer } from '@/lib/webrtc/signaling-server';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type { SignalingMessage } from '@/lib/webrtc/types';
 
 // Form schema with validation
 const formSchema = z.object({
@@ -92,6 +94,9 @@ export function RegisterCameraForm() {
       }
     }
   };
+
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null;
   
   // Generate a unique token when the component mounts
   useEffect(() => {
@@ -124,8 +129,21 @@ export function RegisterCameraForm() {
     fetchBase();
   }, []);
 
+  useEffect(() => {
+    const server = pairingServer;
+    return () => {
+      if (server) {
+        try {
+          server.disconnect();
+        } catch (err) {
+          console.warn('Failed to disconnect pairing server during cleanup', err);
+        }
+      }
+    };
+  }, [pairingServer]);
+
   // Generate QR code for external device registration
-  const generateQrCode = () => {
+  const generateQrCode = async (): Promise<void> => {
     if (!form.getValues("name")) {
       toast.error("Please enter a camera name first");
       return;
@@ -157,55 +175,83 @@ export function RegisterCameraForm() {
       console.error('Supabase not configured: cannot start pairing listener');
       return;
     }
+  const supabaseClient = supabase as SupabaseClient;
 
-    if (supabase) {
+    // Tear down any previous pairing listener before creating a new one
+    if (pairingServer) {
       try {
-        const ss = new SignalingServer(supabase, uniqueToken);
-        ss.connect().then(() => {
-          setPairingServer(ss);
-          setWaitingForDevice(true);
-          toast.info('Waiting for external device to complete registration...');
-
-          ss.onMessage(async (msg: any) => {
-            try {
-              if (msg.type === 'register-camera' && msg.data?.id) {
-                const deviceId = msg.data.id;
-                const deviceName = msg.data.name || form.getValues('name');
-
-                // Create camera entry
-                const newCamera = addCamera({
-                  name: deviceName,
-                  location: 'External Device',
-                  status: 'online',
-                  isRecording: true,
-                  isLocal: false,
-                  lastActivity: new Date().toISOString(),
-                  hasSecurity: false,
-                  token: deviceId,
-                });
-
-                toast.success(`Device "${deviceName}" registered!`);
-
-                // Send acknowledgement back to the device
-                await ss.sendMessage(deviceId, 'register-ack', { cameraId: newCamera.id });
-
-                setWaitingForDevice(false);
-                ss.disconnect();
-                
-                // Redirect to the new camera's detail page
-                router.push(`/dashboard/cameras/${newCamera.id}`);
-                toast.info(`Redirecting to ${deviceName} camera view...`);
-              }
-            } catch (e) {
-              console.error('Error processing registration message', e);
-              toast.error('Failed to process device registration.');
-            }
-          });
-        });
-      } catch (e) {
-        console.error('Failed to start pairing listener', e);
+        pairingServer.disconnect();
+      } catch (err) {
+        console.warn('Failed to disconnect previous pairing server', err);
+      } finally {
+        setPairingServer(null);
       }
     }
+
+    const ss = new SignalingServer(supabaseClient, uniqueToken);
+
+    try {
+      await ss.connect();
+    } catch (error) {
+      console.error('Failed to connect to signaling server for pairing', error);
+      toast.error('Unable to start pairing listener. Please try again.');
+      return;
+    }
+
+    toast.info('Waiting for external device to complete registration...');
+    setWaitingForDevice(true);
+    setPairingServer(ss);
+
+    const handleMessage = async (msg: SignalingMessage) => {
+      console.log('📨 Received message in registration handler:', msg.type, 'from:', msg.sender);
+      
+      try {
+        if (msg.type === 'register-camera' && isRecord(msg.data) && 'id' in msg.data) {
+          console.log('✅ Valid register-camera message received!');
+          const payload = msg.data as Record<string, unknown>;
+          const deviceId = String(payload.id);
+          const deviceName = typeof payload.name === 'string' && payload.name.trim().length
+            ? payload.name
+            : form.getValues('name');
+
+          console.log('📝 Creating camera entry:', { deviceId, deviceName });
+
+          const newCamera = addCamera({
+            name: deviceName,
+            location: 'External Device',
+            status: 'online',
+            isRecording: true,
+            isLocal: false,
+            lastActivity: new Date().toISOString(),
+            hasSecurity: false,
+            token: deviceId,
+          });
+
+          console.log('✅ Camera created:', newCamera.id);
+          toast.success(`Device "${deviceName}" registered!`);
+
+          console.log('📤 Sending register-ack to device...');
+          await ss.sendMessage(deviceId, 'register-ack', { cameraId: newCamera.id });
+          console.log('✅ Ack sent');
+
+          setWaitingForDevice(false);
+          ss.offMessage(handleMessage);
+          ss.disconnect();
+          setPairingServer(null);
+
+          console.log('🚀 Redirecting to:', `/dashboard/cameras/${newCamera.id}`);
+          router.push(`/dashboard/cameras/${newCamera.id}`);
+          toast.info(`Redirecting to ${deviceName} camera view...`);
+        } else {
+          console.log('⚠️ Message does not match register-camera criteria');
+        }
+      } catch (e) {
+        console.error('❌ Error processing registration message', e);
+        toast.error('Failed to process device registration.');
+      }
+    };
+
+    ss.onMessage(handleMessage);
   };
   
 
@@ -249,7 +295,7 @@ export function RegisterCameraForm() {
         router.push(`/dashboard/cameras/stream?${params.toString()}`);
       } else {
         // For external devices: generate QR and start pairing listener; user will scan QR and complete registration from their device.
-        generateQrCode();
+        await generateQrCode();
       }
       
     } catch (error) {
@@ -326,7 +372,7 @@ export function RegisterCameraForm() {
                     <div className="flex justify-center">
                       <Button 
                         type="button"
-                        onClick={generateQrCode}
+                          onClick={() => void generateQrCode()}
                         variant="outline"
                         disabled={!form.watch("name")}
                       >
