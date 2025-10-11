@@ -23,6 +23,8 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CameraIcon, Smartphone, Monitor, Info, Copy } from "lucide-react";
 import { addCamera } from "@/lib/storage";
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { SignalingServer } from '@/lib/webrtc/signaling-server';
 
 // Form schema with validation
 const formSchema = z.object({
@@ -39,8 +41,41 @@ export function RegisterCameraForm() {
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [lanBaseUrl, setLanBaseUrl] = useState<string | null>(null);
   const [uniqueToken, setUniqueToken] = useState<string>("");
+  const [pairingServer, setPairingServer] = useState<SignalingServer | null>(null);
+  const [waitingForDevice, setWaitingForDevice] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState("smartphone");
   const router = useRouter();
+  // Read a public base URL from environment (NEXT_PUBLIC_BASE_URL) if provided.
+  // In client bundles, process.env is replaced at build time; we also check window for runtime overrides.
+  const publicBase = (typeof window !== 'undefined' && (window as any).__NEXT_PUBLIC_BASE_URL)
+    || (process && process.env && process.env.NEXT_PUBLIC_BASE_URL)
+    || null;
+  const [publicBaseReachable, setPublicBaseReachable] = useState<boolean | null>(null);
+
+  // If a public base URL is configured, probe it to ensure it's online. Use an opaque fetch (no-cors)
+  // to distinguish network-level failures (ngrok offline) from CORS issues. If the fetch rejects,
+  // we mark it unreachable; if it resolves, we mark reachable. This avoids pointing QR to an offline ngrok.
+  useEffect(() => {
+    if (!publicBase) {
+      setPublicBaseReachable(null);
+      return;
+    }
+
+    let didCancel = false;
+    const probe = async () => {
+      try {
+        // Attempt a no-cors fetch; this will either resolve (opaque) or reject on network errors.
+        await fetch(publicBase, { method: 'GET', mode: 'no-cors' as RequestMode });
+        if (!didCancel) setPublicBaseReachable(true);
+      } catch (e) {
+        if (!didCancel) setPublicBaseReachable(false);
+      }
+    };
+
+    probe();
+
+    return () => { didCancel = true; };
+  }, [publicBase]);
   
   // Animation variants
   const fadeIn = {
@@ -96,9 +131,17 @@ export function RegisterCameraForm() {
       return;
     }
     
-    // Try to get the current host (supports localhost, network IP, and deployed URLs)
-    const baseUrl = lanBaseUrl ?? (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.host}` : 'http://localhost:3000');
-    const pairingUrl = `${baseUrl}/pair?token=${uniqueToken}&name=${encodeURIComponent(form.getValues("name"))}`;
+    // Prefer a configured public base URL (e.g. ngrok) only if we probed it reachable, otherwise fall back
+    let baseUrl: string;
+    if (publicBase && publicBaseReachable === true) {
+      baseUrl = publicBase;
+    } else {
+      if (publicBase && publicBaseReachable === false) {
+        toast.error('Configured public base URL (ngrok) appears offline; using LAN/base origin instead');
+      }
+      baseUrl = lanBaseUrl ?? (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.host}` : 'http://localhost:3000');
+    }
+    const pairingUrl = `${baseUrl}/stream?external=true&token=${uniqueToken}&camera=${encodeURIComponent(form.getValues("name"))}&autostart=true`;
     setQrCode(pairingUrl);
     
     // Copy the pairing URL to clipboard
@@ -107,6 +150,62 @@ export function RegisterCameraForm() {
     }).catch(() => {
       toast.error("Failed to copy to clipboard");
     });
+
+    // Start listening for the external device to register itself using the pairing token.
+    if (!isSupabaseConfigured) {
+      toast.error('Signaling is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local and restart the dev server.');
+      console.error('Supabase not configured: cannot start pairing listener');
+      return;
+    }
+
+    if (supabase) {
+      try {
+        const ss = new SignalingServer(supabase, uniqueToken);
+        ss.connect().then(() => {
+          setPairingServer(ss);
+          setWaitingForDevice(true);
+          toast.info('Waiting for external device to complete registration...');
+
+          ss.onMessage(async (msg: any) => {
+            try {
+              if (msg.type === 'register-camera' && msg.data?.id) {
+                const deviceId = msg.data.id;
+                const deviceName = msg.data.name || form.getValues('name');
+
+                // Create camera entry
+                const newCamera = addCamera({
+                  name: deviceName,
+                  location: 'External Device',
+                  status: 'online',
+                  isRecording: true,
+                  isLocal: false,
+                  lastActivity: new Date().toISOString(),
+                  hasSecurity: false,
+                  token: deviceId,
+                });
+
+                toast.success(`Device "${deviceName}" registered!`);
+
+                // Send acknowledgement back to the device
+                await ss.sendMessage(deviceId, 'register-ack', { cameraId: newCamera.id });
+
+                setWaitingForDevice(false);
+                ss.disconnect();
+                
+                // Redirect to the new camera's detail page
+                router.push(`/dashboard/cameras/${newCamera.id}`);
+                toast.info(`Redirecting to ${deviceName} camera view...`);
+              }
+            } catch (e) {
+              console.error('Error processing registration message', e);
+              toast.error('Failed to process device registration.');
+            }
+          });
+        });
+      } catch (e) {
+        console.error('Failed to start pairing listener', e);
+      }
+    }
   };
   
 
@@ -126,74 +225,33 @@ export function RegisterCameraForm() {
       
       console.log('Registering camera:', submission);
       
-      // Use the new storage system
-      const newCamera = addCamera({
-        name: values.name,
-        location: values.deviceType === 'current' ? 'This Device' : 'External Device',
-        status: 'online',
-        isRecording: true,
-        isLocal: values.deviceType === 'current',
-        lastActivity: new Date().toISOString(),
-        hasSecurity: false,
-        thumbnailUrl: undefined,
-        token: uniqueToken,
-      });
-
-      toast.success("Camera registered successfully!");
-
-      // If this is the current device, try to capture a short sample recording immediately
+      // If this is the current device, create the camera entry and redirect to the stream page
       if (values.deviceType === 'current') {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-          const recorder = new MediaRecorder(stream);
-          const chunks: Blob[] = [];
-          recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-          recorder.onstop = async () => {
-            const blob = new Blob(chunks, { type: 'video/webm' });
-            // Try to save recording to IndexedDB to avoid localStorage quota issues
-            try {
-              const { saveRecording } = await import('@/lib/recordings');
-              await saveRecording(newCamera.id, blob);
-              window.dispatchEvent(new CustomEvent('camio:recordings:updated', { detail: { cameraId: newCamera.id } }));
-            } catch (e) {
-              // Fallback: store a data URL in localStorage (may hit quota)
-              try {
-                const reader = new FileReader();
-                reader.onload = () => {
-                  try {
-                    const dataUrl = reader.result as string;
-                    const key = `camio:recordings:${newCamera.id}`;
-                    const rawR = localStorage.getItem(key);
-                    const arr = rawR ? JSON.parse(rawR) as string[] : [];
-                    arr.unshift(dataUrl);
-                    localStorage.setItem(key, JSON.stringify(arr.slice(0,5)));
-                    window.dispatchEvent(new CustomEvent('camio:recordings:updated', { detail: { cameraId: newCamera.id } }));
-                  } catch (e2) {
-                    console.error('Failed to save initial recording to localStorage', e2);
-                  }
-                };
-                reader.readAsDataURL(blob);
-              } catch (e2) {
-                console.error('Failed to store initial recording', e2);
-              }
-            }
-            // stop tracks
-            stream.getTracks().forEach(t => t.stop());
-          };
-          recorder.start();
-          setTimeout(() => { if (recorder.state !== 'inactive') recorder.stop(); }, 6000);
-        } catch (e) {
-          console.warn('Could not auto-capture from device at registration', e);
-        }
+        const newCamera = addCamera({
+          name: values.name,
+          location: 'This Device',
+          status: 'online',
+          isRecording: true,
+          isLocal: true,
+          lastActivity: new Date().toISOString(),
+          hasSecurity: false,
+          thumbnailUrl: undefined,
+          token: uniqueToken,
+        });
+
+        toast.success("Camera registered successfully!");
+
+        // Redirect to stream page and auto-start streaming there
+        const params = new URLSearchParams();
+        params.set('camera', values.name);
+        params.set('token', uniqueToken);
+        params.set('autostart', 'true');
+        router.push(`/dashboard/cameras/stream?${params.toString()}`);
+      } else {
+        // For external devices: generate QR and start pairing listener; user will scan QR and complete registration from their device.
+        generateQrCode();
       }
       
-      // Generate the QR code after successful registration for external devices
-      if (values.deviceType === "external") {
-        generateQrCode();
-      } else {
-        // For current device, go back to dashboard where the camera will appear
-        router.push("/dashboard");
-      }
     } catch (error) {
       console.error("Registration error:", error);
       toast.error("Failed to register camera. Please try again.");
@@ -259,27 +317,22 @@ export function RegisterCameraForm() {
                   </div>
                   
                   {/* Network Access Information */}
-                  <div className="bg-amber-50 border border-amber-200 rounded-md p-3 space-y-2">
-                    <div className="flex items-center space-x-2">
-                      <Info className="h-4 w-4 text-amber-600" />
-                      <p className="text-sm font-medium text-amber-800">Network Access Required</p>
+                  <div className="flex flex-col items-center gap-3">
+                    <p className="text-sm text-muted-foreground text-center max-w-sm">
+                      Scan the generated QR on your external device to open the stream page. Once the device
+                      starts streaming, press "Register" on that device to link it with this dashboard.
+                    </p>
+
+                    <div className="flex justify-center">
+                      <Button 
+                        type="button"
+                        onClick={generateQrCode}
+                        variant="outline"
+                        disabled={!form.watch("name")}
+                      >
+                        Generate QR Code
+                      </Button>
                     </div>
-                    <div className="text-sm text-amber-700 space-y-1">
-                      <p>• Ensure both devices are on the same WiFi network</p>
-                      <p>• For external access, consider using ngrok or deploy to production</p>
-                      <p>• Current URL: {lanBaseUrl ?? (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000')}</p>
-                    </div>
-                  </div>
-                  
-                  <div className="flex justify-center">
-                    <Button 
-                      type="button"
-                      onClick={generateQrCode}
-                      variant="outline"
-                      disabled={!form.watch("name")}
-                    >
-                      Generate QR Code
-                    </Button>
                   </div>
                 </motion.div>
               </TabsContent>
@@ -306,55 +359,65 @@ export function RegisterCameraForm() {
             </motion.div>
           </div>
         
-          <motion.div variants={fadeIn} className="flex flex-col-reverse md:flex-row md:justify-between items-center gap-4 pt-4">
-            <div className="flex-1 flex justify-center">
-              {/* QR code will appear here when generated */}
-              {qrCode && (
-                <motion.div 
-                  initial={{ opacity: 0, scale: 0.95 }} 
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ type: "spring", stiffness: 200, damping: 15 }}
-                  className="w-full max-w-md bg-white rounded-lg p-4 shadow-md"
-                >
-                  <div className="flex flex-col items-center gap-3">
-                    <div className="bg-white p-2 rounded-md">
-                      <QRCodeSVG value={qrCode} size={180} />
+            <motion.div variants={fadeIn} className="flex flex-col-reverse md:flex-row md:justify-between items-center gap-4 pt-4">
+              <div className="flex-1 flex justify-center">
+                {/* QR code will appear here when generated */}
+                {qrCode && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95 }} 
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ type: "spring", stiffness: 200, damping: 15 }}
+                    className="w-full max-w-md bg-white rounded-lg p-4 shadow-md"
+                  >
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="bg-white p-2 rounded-md">
+                        <QRCodeSVG value={qrCode} size={180} />
+                      </div>
+                      <div className="text-center">
+                        <p className="text-sm text-muted-foreground">
+                          Scan this code with your device to connect.
+                        </p>
+                        <a 
+                          href={qrCode}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block text-sm text-primary underline mt-2 truncate max-w-xs"
+                        >
+                          {qrCode}
+                        </a>
+                      </div>
                     </div>
-                    <div className="text-center">
-                      <p className="text-sm text-muted-foreground">
-                        Scan this code with your device to connect.
-                      </p>
-                      <a 
-                        href={qrCode}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block text-sm text-primary underline mt-2 truncate max-w-xs"
+                  </motion.div>
+                )}
+              </div>
+
+              <div className="flex-shrink-0">
+                {/* For current/local device show Register; for external scanning flow we hide the submit because
+                    the dashboard will wait for the external device to 'register' itself via signaling. */}
+                {form.watch('deviceType') === 'current' ? (
+                  <Button 
+                    type="submit" 
+                    className="min-w-32"
+                    disabled={isLoading}
+                  >
+                    {isLoading && (
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                        className="mr-2"
                       >
-                        {qrCode}
-                      </a>
-                    </div>
+                        <CameraIcon className="h-4 w-4" />
+                      </motion.div>
+                    )}
+                    Register Camera
+                  </Button>
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    {waitingForDevice ? 'Waiting for device to complete registration...' : 'Generate the QR to start pairing.'}
                   </div>
-                </motion.div>
-              )}
-            </div>
-            
-            <Button 
-              type="submit" 
-              className="min-w-32"
-              disabled={isLoading}
-            >
-              {isLoading && (
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                  className="mr-2"
-                >
-                  <CameraIcon className="h-4 w-4" />
-                </motion.div>
-              )}
-              Register Camera
-            </Button>
-          </motion.div>
+                )}
+              </div>
+            </motion.div>
         </form>
       </motion.div>
     </Form>

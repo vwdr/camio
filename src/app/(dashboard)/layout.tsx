@@ -1,6 +1,5 @@
 "use client";
 
-import { Toaster } from "@/components/ui/sonner";
 import DashboardSidebar from "@/components/layout/dashboard-sidebar";
 import DashboardHeader from "@/components/layout/dashboard-header";
 import { motion } from "framer-motion";
@@ -43,7 +42,6 @@ export default function DashboardLayout({
           {children}
         </motion.main>
       </div>
-      <Toaster />
     </div>
   );
 }

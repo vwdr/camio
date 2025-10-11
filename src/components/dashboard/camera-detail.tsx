@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PlayCircle, PauseCircle, Volume2, VolumeX, Maximize, MessageSquare } from "lucide-react";
@@ -8,10 +9,14 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { motion, AnimatePresence } from "framer-motion";
 import { getRecordings, saveRecording } from '@/lib/recordings';
-import { addTimelineEvent, getTimeline } from '@/lib/timeline';
-import { Timeline as TimelineComp } from '@/components/dashboard/timeline';
+import { addTimelineEvent, getTimeline, type TimelineEvent } from '@/lib/timeline';
 import { acquireStream, getExistingStream, releaseStream } from '@/lib/localStream';
-import { useVideoAnalyzer } from '@/lib/useVideoAnalyzer';
+import { useVideoAnalyzer, type Detection } from '@/lib/useVideoAnalyzer';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { SignalingServer } from '@/lib/webrtc/signaling-server';
+import { PeerConnection } from '@/lib/webrtc/peer-connection';
+import type { SignalingMessage } from '@/lib/webrtc/types';
+import { updateCamera } from '@/lib/storage';
 
 interface Camera {
   id: string;
@@ -26,6 +31,8 @@ interface Camera {
   connected?: string;
   isRecording?: boolean;
   isLocal?: boolean;
+  // When this camera represents an external device, token stores the device's signaling id
+  token?: string;
 }
 
 interface CameraDetailProps {
@@ -42,9 +49,283 @@ export function CameraDetail({ camera }: CameraDetailProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const { start: analyzerStart, stop: analyzerStop, detections, lastAnalysis, lastResult, loadingModels } = useVideoAnalyzer({ enabled: true, fps: 1 });
+  const [viewerState, setViewerState] = useState<'idle'|'connecting'|'connected'|'error'>('idle');
+  const signalingRef = useRef<SignalingServer | null>(null);
+  const pcRef = useRef<PeerConnection | null>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
+  const componentActiveRef = useRef(true);
+  const streamerTargetRef = useRef<string | null>(camera.token ?? null);
 
-  const [timelineEvents, setTimelineEvents] = useState<any[]>([]);
+  useEffect(() => {
+    componentActiveRef.current = true;
+    return () => {
+      componentActiveRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    streamerTargetRef.current = camera.token ?? null;
+  }, [camera.token]);
+
+  type StreamerInfo = { streamId: string; hasStream: boolean };
+
+  const resolveStreamerTarget = async (ss: SignalingServer): Promise<StreamerInfo | null> => {
+    const initialTarget = streamerTargetRef.current ?? camera.token ?? camera.id ?? null;
+    if (!initialTarget) {
+      console.warn('No streamer identifier available for camera', camera.id);
+      return null;
+    }
+
+    return await new Promise<StreamerInfo | null>((resolve) => {
+      let settled = false;
+      let resendIntervalId: ReturnType<typeof setInterval> | undefined;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      let lastKnownStreamId: string | null = streamerTargetRef.current ?? camera.token ?? null;
+      let lastHasStream = false;
+
+      const cleanup = () => {
+        if (resendIntervalId) {
+          clearInterval(resendIntervalId);
+          resendIntervalId = undefined;
+        }
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = undefined;
+        }
+      };
+
+      const resolveOnce = (value: StreamerInfo | null) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        ss.offMessage(handler);
+        resolve(value);
+      };
+
+      const handler = (msg: SignalingMessage) => {
+        if (msg.type === 'streamer-info' && isRecord(msg.data) && 'streamId' in msg.data) {
+          const payload = msg.data as Record<string, unknown>;
+          const streamId = String(payload.streamId);
+          const hasStream = Boolean(payload.hasStream);
+          streamerTargetRef.current = streamId;
+          lastKnownStreamId = streamId;
+          lastHasStream = hasStream;
+          if (streamId !== camera.token) {
+            try {
+              updateCamera(camera.id, { token: streamId });
+            } catch (err) {
+              console.warn('Failed to persist updated streamer token', err);
+            }
+          }
+          if (hasStream) {
+            resolveOnce({ streamId, hasStream: true });
+          }
+        }
+      };
+
+      ss.onMessage(handler);
+
+      const sendRequest = () => {
+        const targetId = streamerTargetRef.current ?? lastKnownStreamId ?? initialTarget;
+        if (!targetId) {
+          return;
+        }
+
+        ss.sendMessage(targetId, 'streamer-info-request', {
+          viewerId: ss.getUserId(),
+          cameraId: camera.id,
+        }).catch((err: unknown) => {
+          console.error('Failed to request streamer info:', toError(err));
+        });
+      };
+
+      sendRequest();
+      resendIntervalId = setInterval(sendRequest, 2000);
+      timeoutId = setTimeout(() => {
+        const fallbackId = streamerTargetRef.current ?? lastKnownStreamId ?? initialTarget;
+        if (fallbackId) {
+          resolveOnce({ streamId: fallbackId, hasStream: lastHasStream });
+        } else {
+          resolveOnce(null);
+        }
+      }, 10000);
+    });
+  };
+
+  const waitForStreamerReady = async (ss: SignalingServer): Promise<string | null> => {
+    let attempt = 0;
+    while (componentActiveRef.current) {
+      const info = await resolveStreamerTarget(ss);
+      if (!componentActiveRef.current) {
+        return null;
+      }
+
+      if (!info) {
+        return null;
+      }
+
+      const { streamId, hasStream } = info;
+      streamerTargetRef.current = streamId;
+
+      if (hasStream) {
+        return streamId;
+      }
+
+      if (attempt === 0) {
+        console.log('Streamer responded but is not streaming yet; waiting for broadcast to start...');
+      }
+      attempt += 1;
+
+      // Wait briefly before requesting status again
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    return null;
+  };
+
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+
+  const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
   
+  const connectToRemoteCamera = async (retry = false) => {
+    if (camera.isLocal || !camera.token) {
+      console.log('Cannot connect: camera is local or has no token');
+      return;
+    }
+
+    if (!isSupabaseConfigured) {
+      console.warn('Supabase is not configured; remote viewing is unavailable');
+      setViewerState('error');
+      return;
+    }
+
+    if (!componentActiveRef.current) {
+      return;
+    }
+
+    if (retry) {
+      reconnectAttemptsRef.current += 1;
+    } else {
+      reconnectAttemptsRef.current = 0;
+    }
+
+    // Tear down any existing connection before creating a new one
+    if (pcRef.current) {
+      try { pcRef.current.close(); } catch (e) { console.error('Error closing previous peer connection', e); }
+      pcRef.current = null;
+    }
+    if (signalingRef.current) {
+      try { signalingRef.current.disconnect(); } catch (e) { console.error('Error disconnecting previous signaling session', e); }
+      signalingRef.current = null;
+    }
+
+    setViewerState('connecting');
+
+    try {
+      const viewerId = `viewer-${Math.random().toString(36).substring(2, 10)}`;
+  const ss = new SignalingServer(supabase as SupabaseClient, viewerId);
+      await ss.connect();
+      if (!componentActiveRef.current) {
+        ss.disconnect();
+        return;
+      }
+      signalingRef.current = ss;
+
+      const resolvedStreamId = await waitForStreamerReady(ss);
+      if (!componentActiveRef.current) {
+        ss.disconnect();
+        return;
+      }
+
+      if (!resolvedStreamId) {
+        console.warn('Unable to determine streamer target for camera', camera.id);
+        setViewerState('error');
+        ss.disconnect();
+        return;
+      }
+
+      const peer = new PeerConnection(ss, undefined, {
+        onConnectionStateChange: (state) => {
+          if (state === 'connected') {
+            setViewerState('connected');
+            reconnectAttemptsRef.current = 0;
+          }
+          if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+            setViewerState('error');
+            if (reconnectAttemptsRef.current < 5 && camera.status === 'online') {
+              setTimeout(() => {
+                if (componentActiveRef.current) {
+                  connectToRemoteCamera(true);
+                }
+              }, 2000);
+            }
+          }
+        },
+        onError: (error) => {
+          console.error('Viewer peer error:', error);
+          setViewerState('error');
+          if (reconnectAttemptsRef.current < 5 && camera.status === 'online') {
+            setTimeout(() => {
+              if (componentActiveRef.current) {
+                connectToRemoteCamera(true);
+              }
+            }, 2000);
+          }
+        },
+        onRemoteStream: async (remoteStream) => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = remoteStream;
+            await videoRef.current.play().catch(console.error);
+            setViewerState('connected');
+            reconnectAttemptsRef.current = 0;
+            if (canvasRef.current) {
+              analyzerStart(videoRef.current, canvasRef.current);
+            }
+          }
+        },
+        onStreamEnded: (reason) => {
+          console.log('Remote stream ended:', reason);
+          setViewerState('idle');
+          analyzerStop();
+          if (camera.status === 'online') {
+            setTimeout(() => {
+              if (componentActiveRef.current) {
+                connectToRemoteCamera(true);
+              }
+            }, 2000);
+          }
+        }
+      });
+
+      pcRef.current = peer;
+
+      try {
+        await peer.initializeAsViewer(resolvedStreamId);
+      } catch (connectionError) {
+        console.error('Failed to initialize viewer peer connection:', connectionError);
+        setViewerState('error');
+        if (reconnectAttemptsRef.current < 5 && camera.status === 'online') {
+          setTimeout(() => {
+            if (componentActiveRef.current) {
+              connectToRemoteCamera(true);
+            }
+          }, 2000);
+        }
+      }
+    } catch (error) {
+      console.error('❌ FAILED to connect:', error);
+      setViewerState('error');
+      if (reconnectAttemptsRef.current < 5 && camera.status === 'online') {
+        setTimeout(() => {
+          if (componentActiveRef.current) {
+            connectToRemoteCamera(true);
+          }
+        }, 2000);
+      }
+    }
+  };
+
   // Toggle play/pause
   const togglePlayback = () => {
     if (videoRef.current) {
@@ -99,10 +380,11 @@ export function CameraDetail({ camera }: CameraDetailProps) {
   useEffect(() => {
     let attached = false;
     let localStream: MediaStream | undefined;
+    const abortRef = { cancelled: false };
+
     const attach = async () => {
       if (camera.isLocal && camera.isRecording && videoRef.current) {
         try {
-          // Try to reuse existing stream first
           const existing = getExistingStream(camera.id);
           if (existing) {
             localStream = existing;
@@ -116,10 +398,15 @@ export function CameraDetail({ camera }: CameraDetailProps) {
         } catch (e) {
           console.warn('Failed to attach shared live stream', e);
         }
+      } else if (!camera.isLocal && camera.status === 'online' && camera.token) {
+        await connectToRemoteCamera();
       }
     };
+
     attach();
+
     return () => {
+      abortRef.cancelled = true;
       if (attached && camera.isLocal) {
         try {
           releaseStream(camera.id);
@@ -128,19 +415,36 @@ export function CameraDetail({ camera }: CameraDetailProps) {
         }
       }
       if (videoRef.current) {
-        // detach object
         try { (videoRef.current as HTMLVideoElement).srcObject = null; } catch (e) {}
       }
+      if (pcRef.current && signalingRef.current) {
+        const remoteId = pcRef.current.getRemoteUserId();
+        if (remoteId) {
+          void signalingRef.current.sendMessage(remoteId, 'disconnect', {});
+        }
+      }
+      if (pcRef.current) {
+        try { pcRef.current.close(); } catch (e) { /* ignore */ }
+        pcRef.current = null;
+      }
+      if (signalingRef.current) {
+        try { signalingRef.current.disconnect(); } catch (e) { /* ignore */ }
+        signalingRef.current = null;
+      }
+      setViewerState('idle');
+      analyzerStop();
     };
-  }, [camera.id, camera.isLocal, camera.isRecording]);
+  }, [camera.id, camera.isLocal, camera.isRecording, camera.status, camera.token]);
 
   // start/stop analyzer when appropriate
   useEffect(() => {
     const v = videoRef.current;
     const c = canvasRef.current;
-    if (v && c && camera.isLocal && camera.isRecording) {
+    const shouldAnalyzeLocal = camera.isLocal && camera.isRecording;
+    if (v && c && shouldAnalyzeLocal) {
       analyzerStart(v, c);
-    } else {
+    } else if (!shouldAnalyzeLocal) {
+      // For remote streams, analyzerStart is triggered when onRemoteStream fires
       analyzerStop();
     }
     return () => analyzerStop();
@@ -149,7 +453,12 @@ export function CameraDetail({ camera }: CameraDetailProps) {
   // load timeline for this camera
   useEffect(() => {
     setTimelineEvents(getTimeline(camera.id));
-    const onUpdate = (e: any) => { if (!e?.detail || e.detail.cameraId === camera.id) setTimelineEvents(getTimeline(camera.id)); };
+    const onUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<{ cameraId?: string }>).detail;
+      if (!detail || detail.cameraId === camera.id) {
+        setTimelineEvents(getTimeline(camera.id));
+      }
+    };
     window.addEventListener('camio:timeline:updated', onUpdate as EventListener);
     return () => window.removeEventListener('camio:timeline:updated', onUpdate as EventListener);
   }, [camera.id]);
@@ -190,8 +499,8 @@ export function CameraDetail({ camera }: CameraDetailProps) {
     canvas.height = video.videoHeight || canvas.height;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     try {
-  const dets = detections || [];
-      dets.forEach((d: any) => {
+      const dets: Detection[] = detections || [];
+      dets.forEach((d) => {
         const { bbox, label } = d;
         const x = Math.max(0, Math.floor(bbox.x * canvas.width));
         const y = Math.max(0, Math.floor(bbox.y * canvas.height));
@@ -295,8 +604,11 @@ export function CameraDetail({ camera }: CameraDetailProps) {
         <Card>
           <CardContent className="p-0">
             <div className="relative aspect-video bg-black">
-              {/* In a real app, this would be a real video stream */}
-            {((recordingUrl) || (camera.streamUrl && camera.status === "online") || (camera.isLocal && camera.isRecording)) ? (
+              {/* Live/recorded/local/remote video */}
+            {((recordingUrl)
+              || (camera.streamUrl && camera.status === "online")
+              || (camera.isLocal && camera.isRecording)
+              || (viewerState === 'connecting' || viewerState === 'connected')) ? (
                 <>
                   <video 
                     ref={videoRef}
@@ -315,18 +627,37 @@ export function CameraDetail({ camera }: CameraDetailProps) {
                         // We leave the <video> without <source> so we can set srcObject in effect
                         null
                       ) : (
-                        <source src={camera.streamUrl} type="video/mp4" />
+                        // For remote WebRTC viewer, srcObject will be set by the connection handler
+                        camera.streamUrl ? <source src={camera.streamUrl} type="video/mp4" /> : null
                       )
                     )}
                     Your browser does not support the video tag.
                   </video>
+                  {(!camera.isLocal && camera.status === 'online' && viewerState === 'error') && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-white space-y-3">
+                      <span className="text-sm">Could not connect to the remote camera.</span>
+                      <Button variant="outline" size="sm" onClick={() => connectToRemoteCamera(true)}>
+                        Retry Connection
+                      </Button>
+                    </div>
+                  )}
+                  {(viewerState === 'connecting') && (
+                    <div className="absolute top-2 right-2 bg-black/60 text-white text-xs px-2 py-1 rounded-full">
+                      Connecting…
+                    </div>
+                  )}
+                  {(viewerState === 'connected') && (
+                    <div className="absolute top-2 right-2 bg-black/60 text-white text-xs px-2 py-1 rounded-full">
+                      LIVE (remote)
+                    </div>
+                  )}
                   <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
                 </>
               ) : (
                 <div className="flex flex-col items-center justify-center h-full bg-black text-white">
                   <span className="text-lg mb-2">
                     {camera.status === "online" 
-                      ? "Camera feed not available" 
+                      ? "Camera feed not available"
                       : "Camera is offline"}
                   </span>
                   <span className="text-sm text-gray-400">

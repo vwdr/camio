@@ -34,9 +34,15 @@ export default function PairPage() {
       setIsPaired(true);
       toast.success("Device paired successfully!");
       
-      // Redirect to camera streaming page for external devices
+      // Redirect to camera streaming page for external devices, include the pairing token so
+      // the streamer registers with the signaling server under the token and viewers can connect.
       setTimeout(() => {
-        router.push("/cameras/stream?external=true&camera=" + encodeURIComponent(name || 'External Camera'));
+        const params = new URLSearchParams();
+        params.set('external', 'true');
+        params.set('camera', String(name || 'External Camera'));
+        // forward the token so the streaming page knows which signaling id to use
+        if (token) params.set('token', token);
+        router.push(`/dashboard/cameras/stream?${params.toString()}`);
       }, 2000);
     } catch (error) {
       toast.error("Failed to pair device. Please try again.");

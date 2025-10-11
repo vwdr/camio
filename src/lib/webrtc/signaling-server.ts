@@ -1,21 +1,29 @@
 // src/lib/webrtc/signaling-server.ts
-import { createClient } from '@supabase/supabase-js';
+import type { RealtimeChannel, RealtimePostgresInsertPayload, SupabaseClient } from '@supabase/supabase-js';
+import type { SignalingMessage, JsonValue } from './types';
 
-interface SignalingMessage {
-  type: string;
+interface SignalingMessageRow {
+  id: string;
+  channel: string;
+  message_type: string;
   sender: string;
   recipient: string;
-  data: any;
+  data: JsonValue | null;
+  created_at: string;
 }
 
+type SignalingCallback = (message: SignalingMessage) => void;
+
 export class SignalingServer {
-  private supabase;
+  private supabase: SupabaseClient;
   private userId: string;
   private channel: string;
-  private onMessageCallback: ((message: SignalingMessage) => void) | null = null;
-  private subscription: any = null;
+  // Support multiple listeners so different subsystems (pairing flow, peer connections)
+  // can receive messages concurrently.
+  private onMessageCallbacks: SignalingCallback[] = [];
+  private subscription: RealtimeChannel | null = null;
 
-  constructor(supabaseClient: any, userId: string, channel: string = 'webrtc-signaling') {
+  constructor(supabaseClient: SupabaseClient, userId: string, channel: string = 'webrtc-signaling') {
     this.supabase = supabaseClient;
     this.userId = userId;
     this.channel = channel;
@@ -27,10 +35,9 @@ export class SignalingServer {
   async connect(): Promise<void> {
     try {
       // Create or check if the channel exists
-      const { data: channel, error } = await this.supabase
+      const { error } = await this.supabase
         .from('signaling_channels')
-        .upsert({ channel_name: this.channel }, { onConflict: 'channel_name' })
-        .select();
+        .upsert({ channel_name: this.channel }, { onConflict: 'channel_name' });
 
       if (error) {
         console.error('Error connecting to signaling channel:', error);
@@ -45,20 +52,32 @@ export class SignalingServer {
           schema: 'public',
           table: 'signaling_messages',
           filter: `recipient=eq.${this.userId}`,
-        }, (payload: any) => {
-          if (this.onMessageCallback && payload.new) {
+  }, (payload: RealtimePostgresInsertPayload<SignalingMessageRow>) => {
+          if (payload.new) {
             try {
-              // Parse the message data
+              // Normalize data: may already be an object (jsonb) or a JSON string
+              const raw = payload.new.data;
+              const normalizedData = typeof raw === 'string'
+                ? (() => { try { return JSON.parse(raw); } catch { return { value: raw }; } })()
+                : (raw ?? {});
+
               const message: SignalingMessage = {
                 type: payload.new.message_type,
                 sender: payload.new.sender,
                 recipient: payload.new.recipient,
-                data: JSON.parse(payload.new.data || '{}')
+                data: normalizedData as Record<string, unknown>
               };
-              
-              this.onMessageCallback(message);
+
+              // fan-out to all listeners
+              for (const cb of this.onMessageCallbacks) {
+                try {
+                  cb(message);
+                } catch (cbErr) {
+                  console.error('Signaling onMessage callback error:', cbErr);
+                }
+              }
             } catch (error) {
-              console.error('Error parsing signaling message:', error);
+              console.error('Error handling signaling message payload:', error);
             }
           }
         })
@@ -74,20 +93,25 @@ export class SignalingServer {
   /**
    * Send a signaling message to another user
    */
-  async sendMessage(recipientId: string, type: string, data: any): Promise<void> {
+  async sendMessage(
+    recipientId: string,
+    type: string,
+    data: Record<string, unknown>
+  ): Promise<void> {
     if (!recipientId) {
       console.error('Cannot send message: No recipient ID provided');
       return;
     }
 
     try {
-      // Ensure data is JSON serializable
-      let serializedData;
+      // Ensure data is JSON-serializable and store as proper jsonb
+      let jsonPayload: Record<string, unknown> = {};
       try {
-        serializedData = JSON.stringify(data || {});
+        // This will deep-clone only serializable values
+        jsonPayload = data == null ? {} : JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
       } catch (err) {
-        console.error('Error serializing message data:', err);
-        serializedData = '{}';
+        console.warn('Non-serializable data passed to sendMessage; sending empty object instead', err);
+        jsonPayload = {};
       }
 
       const { error } = await this.supabase
@@ -96,7 +120,7 @@ export class SignalingServer {
           message_type: type,
           sender: this.userId,
           recipient: recipientId,
-          data: serializedData,
+          data: jsonPayload,
           channel: this.channel,
           created_at: new Date().toISOString()
         });
@@ -115,7 +139,12 @@ export class SignalingServer {
    * Listen for incoming signaling messages
    */
   onMessage(callback: (message: SignalingMessage) => void): void {
-    this.onMessageCallback = callback;
+    // Add listener; allow multiple registrations
+    this.onMessageCallbacks.push(callback);
+  }
+
+  offMessage(callback: (message: SignalingMessage) => void): void {
+    this.onMessageCallbacks = this.onMessageCallbacks.filter(cb => cb !== callback);
   }
 
   /**
@@ -126,7 +155,7 @@ export class SignalingServer {
       this.supabase.removeChannel(this.subscription);
       this.subscription = null;
     }
-    this.onMessageCallback = null;
+    this.onMessageCallbacks = [];
     console.log('Disconnected from signaling server');
   }
   

@@ -10,12 +10,24 @@ import {
   Loader2
 } from "lucide-react";
 import { toast } from "sonner";
+import { supabase } from '@/lib/supabase/client';
+import { SignalingServer } from '@/lib/webrtc/signaling-server';
+import { PeerConnection } from '@/lib/webrtc/peer-connection';
 
 export function CameraViewer() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isMuted, setIsMuted] = useState(true);
   const [streamId, setStreamId] = useState<string>("");
+  const [signaling, setSignaling] = useState<SignalingServer | null>(null);
+  const pcRef = useRef<PeerConnection | null>(null);
+
+  useEffect(() => {
+    return () => {
+      try { pcRef.current?.close(); } catch (e) { console.warn('Error closing pc', e); }
+      try { signaling?.disconnect(); } catch (e) { /* ignore */ }
+    };
+  }, [signaling]);
   
   // Handle stream ID input
   const handleConnect = () => {
@@ -23,21 +35,38 @@ export function CameraViewer() {
       toast.error("Please enter a Stream ID to connect");
       return;
     }
-    
+
     setIsLoading(true);
-    
-    // In a real implementation, this would connect to a WebRTC peer
-    // For this demo, we'll simulate a connection after a delay
-    setTimeout(() => {
-      toast.success(`Connected to stream ${streamId}`);
-      setIsLoading(false);
-      
-      // In a real app, we would display the remote peer's video stream here
-      // For this demo, we'll just show a static image or placeholder
-      if (videoRef.current) {
-        videoRef.current.poster = "/dashboard-preview.png";
+
+    (async () => {
+      try {
+        const viewerId = `viewer-${Math.random().toString(36).substring(2, 12)}`;
+        const ss = new SignalingServer(supabase, viewerId);
+        await ss.connect();
+        setSignaling(ss);
+
+        const pc = new PeerConnection(ss, undefined, {
+          onError: (e) => { console.error('Viewer PC error', e); toast.error('Connection error'); },
+          onConnectionStateChange: (s) => console.log('Viewer connection state', s),
+          onRemoteStream: (stream) => {
+            if (videoRef.current) {
+              videoRef.current.srcObject = stream;
+              videoRef.current.play().catch(() => {});
+            }
+          }
+        });
+        pcRef.current = pc;
+
+        await pc.initializeAsViewer(streamId);
+
+        toast.success(`Connected to stream ${streamId}`);
+        setIsLoading(false);
+      } catch (err: any) {
+        console.error('Failed to connect to stream', err);
+        toast.error('Failed to connect to stream');
+        setIsLoading(false);
       }
-    }, 2000);
+    })();
   };
   
   // Toggle audio mute
@@ -109,3 +138,5 @@ export function CameraViewer() {
     </Card>
   );
 }
+
+// cleanup handled by React unmount via effect inside component

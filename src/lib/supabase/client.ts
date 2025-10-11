@@ -7,9 +7,9 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 
 type AuthStub = {
-	signInWithPassword: (..._args: any[]) => Promise<never>;
-	signUp: (..._args: any[]) => Promise<never>;
-	signOut: (..._args: any[]) => Promise<never>;
+	signInWithPassword: (..._args: unknown[]) => Promise<never>;
+	signUp: (..._args: unknown[]) => Promise<never>;
+	signOut: (..._args: unknown[]) => Promise<never>;
 };
 
 let supabase: SupabaseClient | { auth: AuthStub };

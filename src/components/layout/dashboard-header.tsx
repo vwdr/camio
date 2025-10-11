@@ -180,7 +180,7 @@ export default function DashboardHeader() {
         >
           <motion.div whileHover={{ scale: 1.05 }}>
             <Button asChild>
-              <Link href="/cameras/register">
+              <Link href="/dashboard/cameras/register">
                 <CameraIcon className="mr-2 h-4 w-4" />
                 Add New Camera
               </Link>

@@ -12,6 +12,9 @@ import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/componen
 import { Button } from "@/components/ui/button";
 import { CameraOff, PlayCircle, Shield, ShieldAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { SignalingServer } from '@/lib/webrtc/signaling-server';
+import { PeerConnection } from '@/lib/webrtc/peer-connection';
 
 interface Camera {
   id: string;
@@ -23,6 +26,8 @@ interface Camera {
   isRecording?: boolean;
   isLocal?: boolean;
   thumbnailUrl?: string;
+  // for external devices, token stores the device signaling id
+  token?: string;
 }
 
 interface CameraCardProps {
@@ -37,19 +42,24 @@ export function CameraCard({ camera }: CameraCardProps) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const currentStreamCameraId = useRef<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const { start: analyzerStart, stop: analyzerStop, detections, lastAnalysis, loadingModels } = useVideoAnalyzer({ enabled: true, fps: 1 });
+  const signalingRef = useRef<SignalingServer | null>(null);
+  const pcRef = useRef<PeerConnection | null>(null);
+  const [viewerState, setViewerState] = useState<'idle'|'connecting'|'connected'|'error'>('idle');
   
   // In a real application, this would trigger a real camera stream
   const handleViewLive = () => {
     setIsLoading(true);
     // Redirect to the camera detail page
-    window.location.href = `/cameras/${camera.id}`;
+    window.location.href = `/dashboard/cameras/${camera.id}`;
   };
 
   useEffect(() => {
     let mounted = true;
+    let cleanedUp = false;
     (async () => {
       try {
         const blobs = await getRecordings(camera.id);
@@ -113,6 +123,11 @@ export function CameraCard({ camera }: CameraCardProps) {
           currentStreamCameraId.current = null;
         }
       }
+      // tear down remote viewer
+      try { pcRef.current?.close(); } catch {}
+      try { signalingRef.current?.disconnect(); } catch {}
+      pcRef.current = null;
+      signalingRef.current = null;
     };
   }, [camera.id]);
 
@@ -158,6 +173,17 @@ export function CameraCard({ camera }: CameraCardProps) {
       // ignore drawing errors
     }
   }, [detections, canvasRef.current, videoRef.current]);
+
+  // Remote camera live preview: removed automatic connection to prevent conflicts
+  useEffect(() => {
+    // Cleanup any existing connections on unmount
+    return () => {
+      try { pcRef.current?.close(); } catch {}
+      try { signalingRef.current?.disconnect(); } catch {}
+      pcRef.current = null;
+      signalingRef.current = null;
+    };
+  }, []);
 
   // Helper to convert blob to dataURL
   const blobToDataUrl = (blob: Blob) => new Promise<string>((res, rej) => {
@@ -298,7 +324,7 @@ export function CameraCard({ camera }: CameraCardProps) {
       whileHover="hover"
       variants={cardVariants}
     >
-      <Card className={cn(
+      <Card ref={cardRef} className={cn(
         "overflow-hidden",
         camera.status === "offline" && "opacity-70"
       )}>
@@ -366,6 +392,19 @@ export function CameraCard({ camera }: CameraCardProps) {
               <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
               <div className="absolute bottom-2 right-2 bg-black/60 text-white text-xs px-2 py-1 rounded-full">
                 LIVE
+              </div>
+            </div>
+          ) : (!camera.isLocal && camera.status === 'online' && camera.token && (viewerState === 'connecting' || viewerState === 'connected')) ? (
+            <div className="relative w-full h-full overflow-hidden">
+              <video
+                ref={videoRef}
+                autoPlay
+                muted
+                playsInline
+                className="absolute w-full h-full object-cover"
+              />
+              <div className="absolute bottom-2 right-2 bg-black/60 text-white text-xs px-2 py-1 rounded-full">
+                {viewerState === 'connected' ? 'LIVE' : 'CONNECTING…'}
               </div>
             </div>
           ) : camera.status === "online" ? (
@@ -462,7 +501,7 @@ export function CameraCard({ camera }: CameraCardProps) {
         <div>
           <div className="text-sm text-muted-foreground">{camera.location}</div>
         </div>
-        <Link href={`/cameras/${camera.id}`}>
+        <Link href={`/dashboard/cameras/${camera.id}`}>
           <motion.div
             whileHover={{ x: 3 }}
             whileTap={{ scale: 0.98 }}

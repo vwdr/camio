@@ -94,3 +94,35 @@ export async function registerStream(streamData: {
     return { success: false, error };
   }
 }
+
+export interface Camera {
+  id: string;
+  name: string;
+  token: string;
+  createdAt: string;
+  sdpOffer?: RTCSessionDescriptionInit;
+}
+
+export const getRegisteredCameras = (): Camera[] => {
+  const cameras = localStorage.getItem('camio:cameras');
+  return cameras ? JSON.parse(cameras) : [];
+};
+
+export const addCameraToLocal = (camera: Camera) => {
+  const cameras = getRegisteredCameras();
+  const updatedCameras = [...cameras, camera];
+  localStorage.setItem('camio:cameras', JSON.stringify(updatedCameras));
+};
+
+export const updateCameraSdpOffer = (cameraId: string, sdpOffer: RTCSessionDescriptionInit) => {
+  const cameras = getRegisteredCameras();
+  const cameraIndex = cameras.findIndex(c => c.id === cameraId);
+  if (cameraIndex !== -1) {
+    cameras[cameraIndex].sdpOffer = sdpOffer;
+    localStorage.setItem('camio:cameras', JSON.stringify(cameras));
+  }
+};
+
+export const getCameraById = (id: string): Camera | undefined => {
+  return getRegisteredCameras().find(camera => camera.id === id);
+};

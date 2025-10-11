@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useEffect } from "react";
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { 
@@ -15,19 +16,217 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { saveRecording } from '@/lib/recordings';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { SignalingServer } from '@/lib/webrtc/signaling-server';
+import { PeerConnection } from '@/lib/webrtc/peer-connection';
+import type {
+  SignalingMessage,
+  StreamerInfoRequestPayload,
+} from '@/lib/webrtc/types';
+
+const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const isStreamerInfoRequestMessage = (
+  message: SignalingMessage
+): message is SignalingMessage<StreamerInfoRequestPayload> => {
+  if (message.type !== 'streamer-info-request' || !isRecord(message.data)) {
+    return false;
+  }
+  const candidate = message.data as Record<string, unknown>;
+  return typeof candidate.viewerId === 'string';
+};
+
+const isRegisterAckMessage = (message: SignalingMessage): boolean =>
+  message.type === 'register-ack';
 
 export function CameraStream() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const isStreamingRef = useRef<boolean>(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [deviceId, setDeviceId] = useState<string>("");
   const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
-  const [streamId] = useState<string>(`camio-${Math.random().toString(36).substring(2, 15)}`);
+  const [streamId] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const pairingToken = params.get('token')?.trim();
+      if (pairingToken) {
+        return pairingToken;
+      }
+
+      try {
+        const persisted = window.localStorage.getItem('camio:last-stream-id');
+        if (persisted) {
+          return persisted;
+        }
+      } catch (err) {
+        console.warn('Failed to read persisted stream id:', err);
+      }
+    }
+
+    return `camio-${Math.random().toString(36).substring(2, 15)}`;
+  });
   const [recordedChunks, setRecordedChunks] = useState<Blob[]>([]);
   const [isSecure, setIsSecure] = useState<boolean>(true);
   const [permissionHint, setPermissionHint] = useState<string>("");
+  const signalingRef = useRef<SignalingServer | null>(null);
+  const peerConnectionRef = useRef<PeerConnection | null>(null);
+  const infoResponderAttachedRef = useRef(false);
+  
+  // External device parameters
+  const tokenParam = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('token') : null;
+  const isExternal = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('external') === 'true' : false;
+  const cameraName = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('camera') || 'External Camera' : 'External Camera';
+  const autoStart = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('autostart') === 'true' : false;
+  const [registered, setRegistered] = useState<boolean>(false);
+  const registrationListenerAttachedRef = useRef(false);
+  const registrationConfirmedRef = useRef(false);
+  const signalingErrorShownRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem('camio:last-stream-id', streamId);
+      } catch (err) {
+        console.warn('Failed to persist stream id:', err);
+      }
+    }
+  }, [streamId]);
+
+  useEffect(() => {
+    isStreamingRef.current = isStreaming;
+  }, [isStreaming]);
+
+  const ensureSignalingConnection = async (): Promise<SignalingServer | null> => {
+    if (!isSupabaseConfigured) {
+      return null;
+    }
+
+    if (signalingRef.current) {
+      return signalingRef.current;
+    }
+
+    try {
+  const ss = new SignalingServer(supabase as SupabaseClient, streamId);
+      await ss.connect();
+      if (!infoResponderAttachedRef.current) {
+        ss.onMessage(async (msg) => {
+          if (!isStreamerInfoRequestMessage(msg)) {
+            return;
+          }
+
+          try {
+            const payload: Record<string, unknown> = {
+              streamId,
+              isStreaming: isStreamingRef.current,
+              hasStream: Boolean(streamRef.current),
+            };
+            await ss.sendMessage(msg.sender, 'streamer-info', payload);
+          } catch (err) {
+            console.warn('Failed to respond to streamer-info-request:', toError(err));
+          }
+        });
+        infoResponderAttachedRef.current = true;
+      }
+      signalingRef.current = ss;
+      return ss;
+    } catch (error) {
+      console.error('❌ Failed to connect to signaling server:', error);
+      if (!signalingErrorShownRef.current) {
+        toast.error('Remote viewing unavailable: signaling server connection failed.');
+        signalingErrorShownRef.current = true;
+      }
+      return null;
+    }
+  };
+
+  const teardownRemoteStreaming = async (reason: string) => {
+    const peer = peerConnectionRef.current;
+    const ss = signalingRef.current;
+
+    if (peer && ss) {
+      const remoteId = peer.getRemoteUserId();
+      if (remoteId) {
+        try {
+          await ss.sendMessage(remoteId, 'stream-ended', { reason });
+        } catch (err) {
+          console.warn('Failed to notify viewer about stream end:', err);
+        }
+      }
+    }
+
+    if (peer) {
+      try {
+        peer.close();
+      } catch (err) {
+        console.error('Error closing peer connection:', err);
+      }
+      peerConnectionRef.current = null;
+    }
+
+    if (ss) {
+      try {
+        ss.disconnect();
+      } catch (err) {
+        console.error('Error disconnecting signaling server:', err);
+      }
+      signalingRef.current = null;
+      registrationListenerAttachedRef.current = false;
+      signalingErrorShownRef.current = false;
+      infoResponderAttachedRef.current = false;
+    }
+  };
+
+  const setupRemoteStreaming = async (mediaStream: MediaStream) => {
+    if (!isSupabaseConfigured) {
+      console.warn('Supabase not configured; remote viewing disabled');
+      return;
+    }
+
+    const ss = await ensureSignalingConnection();
+    if (!ss) return;
+
+    if (peerConnectionRef.current) {
+      const existingViewer = peerConnectionRef.current.getRemoteUserId();
+      if (existingViewer) {
+        try {
+          await ss.sendMessage(existingViewer, 'stream-ended', { reason: 'Streamer restarted broadcast' });
+        } catch (err) {
+          console.warn('Failed to notify previous viewer about restart:', err);
+        }
+      }
+      try {
+        peerConnectionRef.current.close();
+      } catch (err) {
+        console.error('Error closing previous peer connection:', err);
+      }
+      peerConnectionRef.current = null;
+    }
+
+    const peer = new PeerConnection(ss, undefined, {
+      onConnectionStateChange: (state) => {
+        if (state === 'connected') {
+          console.log('Viewer connected to stream');
+        }
+        if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+          console.log('Viewer disconnected from stream');
+        }
+      },
+      onError: (error) => {
+        console.error('Streamer peer error:', error);
+        toast.error('Remote streaming encountered an error.');
+      }
+    });
+
+    peer.setLocalStream(mediaStream);
+    peerConnectionRef.current = peer;
+  };
 
   // Function to get available cameras
   useEffect(() => {
@@ -52,17 +251,70 @@ export function CameraStream() {
     getAvailableCameras();
   }, [deviceId]);
 
+  // External device registration
+  const registerWithDashboard = async () => {
+    if (!isExternal || !tokenParam || !isSupabaseConfigured || registrationConfirmedRef.current) {
+      return;
+    }
+
+    try {
+      console.log('🔄 Registering external device with dashboard...');
+      const ss = await ensureSignalingConnection();
+      if (!ss) {
+        throw new Error('Signaling server unavailable');
+      }
+
+      if (!registrationListenerAttachedRef.current) {
+        ss.onMessage((msg) => {
+          if (!isRegisterAckMessage(msg) || registrationConfirmedRef.current) {
+            return;
+          }
+
+          console.log('✅ Registration acknowledged by dashboard');
+          registrationConfirmedRef.current = true;
+          setRegistered(true);
+          toast.success('Registration confirmed!');
+        });
+        registrationListenerAttachedRef.current = true;
+      }
+
+      await ss.sendMessage(tokenParam, 'register-camera', {
+        id: streamId,
+        name: cameraName,
+        token: streamId,
+      });
+
+      console.log('📡 Registration message sent to dashboard');
+      toast.info('Registration request sent. Waiting for confirmation...');
+
+    } catch (error) {
+      console.error('❌ Failed to register with dashboard:', error);
+      toast.error('Failed to register with dashboard');
+    }
+  };
+
+  // Auto-start for external devices
+  useEffect(() => {
+    if (isExternal && autoStart && !isStreaming) {
+      console.log('🚀 Auto-starting external device...');
+      toggleStreaming();
+    }
+  }, [isExternal, autoStart, isStreaming]);
+
   // Start/stop streaming
   const toggleStreaming = async () => {
     if (isStreaming && stream) {
       // Stop streaming
       stream.getTracks().forEach(track => track.stop());
+  streamRef.current = null;
       setStream(null);
       setIsStreaming(false);
       
       if (isRecording) {
         stopRecording();
       }
+
+      await teardownRemoteStreaming('Streamer stopped broadcasting');
       
       toast.info("Camera streaming stopped");
     } else {
@@ -86,8 +338,9 @@ export function CameraStream() {
           }
         };
         
-        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-        setStream(mediaStream);
+    const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+    streamRef.current = mediaStream;
+    setStream(mediaStream);
         
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
@@ -95,18 +348,29 @@ export function CameraStream() {
         
         setIsStreaming(true);
         toast.success("Camera streaming started");
-      } catch (error: any) {
-        console.error('Error accessing media devices:', error);
+
+        await setupRemoteStreaming(mediaStream);
+
+        // For external devices, register with dashboard
+        if (isExternal && tokenParam) {
+          await registerWithDashboard();
+        }
+      } catch (error) {
+        const err = toError(error);
+        console.error('Error accessing media devices:', err);
         let message = "Failed to access camera. Please check permissions.";
-        if (error?.name === 'NotAllowedError') {
+        const errorName = (error as { name?: string } | undefined)?.name;
+        if (errorName === 'NotAllowedError') {
           message = "Camera permission denied. Allow camera access in your browser settings.";
-        } else if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
+        } else if (errorName === 'NotFoundError' || errorName === 'DevicesNotFoundError') {
           message = "No camera found. Please connect a camera or check system permissions.";
-        } else if (error?.name === 'SecurityError') {
+        } else if (errorName === 'SecurityError') {
           message = "Camera blocked on insecure connection. Use HTTPS or localhost.";
         }
         setPermissionHint(message);
         toast.error(message);
+        await teardownRemoteStreaming('Failed to access camera');
+        streamRef.current = null;
       }
     }
   };
@@ -179,10 +443,13 @@ export function CameraStream() {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
+      streamRef.current = null;
       
       if (mediaRecorderRef.current && isRecording) {
         mediaRecorderRef.current.stop();
       }
+
+      void teardownRemoteStreaming('Device navigated away');
     };
   }, [stream, isRecording]);
   
@@ -198,6 +465,7 @@ export function CameraStream() {
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
     }
+    streamRef.current = null;
     
     setDeviceId(nextDeviceId);
     
@@ -213,7 +481,8 @@ export function CameraStream() {
           }
         });
         
-        setStream(mediaStream);
+  streamRef.current = mediaStream;
+  setStream(mediaStream);
         
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
