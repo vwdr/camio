@@ -151,6 +151,20 @@ export class PeerConnection {
         if (this.callbacks.onRemoteStream) {
           this.callbacks.onRemoteStream(this.remoteStream);
         }
+        // Some browsers deliver tracks muted initially; when they unmute, retry delivering the stream
+        try {
+          const track = event.track;
+          if (track) {
+            const handler = () => {
+              if (this.remoteStream && this.callbacks.onRemoteStream) {
+                this.callbacks.onRemoteStream(this.remoteStream);
+              }
+              // Remove after first fire
+              try { track.removeEventListener('unmute', handler as any); } catch {}
+            };
+            track.addEventListener('unmute', handler as any, { once: true } as any);
+          }
+        } catch {}
       }
     };
     

@@ -45,6 +45,8 @@ export function CameraDetail({ camera }: CameraDetailProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  // Fallback: show a tap overlay only if autoplay fails after robust retries
+  const [needsUserGesture, setNeedsUserGesture] = useState(false);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -304,14 +306,67 @@ export function CameraDetail({ camera }: CameraDetailProps) {
           }
         },
         onRemoteStream: async (remoteStream) => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = remoteStream;
-            await videoRef.current.play().catch(console.error);
-            setViewerState('connected');
-            reconnectAttemptsRef.current = 0;
-            if (canvasRef.current) {
-              analyzerStart(videoRef.current, canvasRef.current);
+          const v = videoRef.current;
+          if (!v) return;
+          // Avoid thrashing srcObject/play if the same stream arrives again (e.g., separate audio/video tracks)
+          if (v.srcObject !== remoteStream) {
+            v.srcObject = remoteStream;
+          }
+          // Ensure autoplay-friendly flags are set as properties
+          v.muted = true;
+          v.playsInline = true as any;
+          // Clear any previous listener and set a new one to hide overlay when playing
+          const onPlayingHideOverlay = () => setNeedsUserGesture(false);
+          v.removeEventListener?.('playing', onPlayingHideOverlay as any);
+          v.addEventListener('playing', onPlayingHideOverlay as any, { once: true } as any);
+
+          // Wait for the element to have enough metadata to play
+          const waitForReady = async () => {
+            if (v.readyState >= 2) return; // HAVE_CURRENT_DATA
+            await new Promise<void>((resolve) => {
+              let settled = false;
+              const on = () => { if (settled) return; settled = true; v.removeEventListener('loadedmetadata', on); v.removeEventListener('canplay', on); resolve(); };
+              v.addEventListener('loadedmetadata', on, { once: true } as any);
+              v.addEventListener('canplay', on, { once: true } as any);
+              // Fallback timeout
+              setTimeout(() => { if (!settled) { settled = true; v.removeEventListener('loadedmetadata', on); v.removeEventListener('canplay', on); resolve(); } }, 400);
+            });
+          };
+
+          // Defer to next frame, then wait for readiness
+          await new Promise<void>((r) => requestAnimationFrame(() => r()));
+          await waitForReady();
+
+          // Retry play a few times to overcome transient AbortError; wait until we get 'playing'
+          const ensurePlaying = async () => {
+            for (let i = 0; i < 4; i++) {
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                await v.play();
+                if (!v.paused) return;
+              } catch (e) {
+                // ignore and retry
+              }
+              // eslint-disable-next-line no-await-in-loop
+              await new Promise((res) => setTimeout(res, 200));
             }
+          };
+          const played = new Promise<void>((resolve) => {
+            const onPlaying = () => { v.removeEventListener('playing', onPlaying); resolve(); };
+            v.addEventListener('playing', onPlaying, { once: true } as any);
+          });
+          await Promise.race([ensurePlaying(), played]);
+
+          // If still paused, surface a small tap-to-start overlay
+          if (v.paused) {
+            setNeedsUserGesture(true);
+          }
+
+          setViewerState('connected');
+          reconnectAttemptsRef.current = 0;
+          if (canvasRef.current) {
+            // Start analyzer after playback is confirmed
+            analyzerStart(v, canvasRef.current);
           }
         },
         onStreamEnded: (reason) => {
@@ -665,6 +720,26 @@ export function CameraDetail({ camera }: CameraDetailProps) {
                     )}
                     Your browser does not support the video tag.
                   </video>
+                  {needsUserGesture && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+                      <Button
+                        variant="outline"
+                        className="bg-white/10 text-white border-white/30 hover:bg-white/20"
+                        onClick={async () => {
+                          const v = videoRef.current;
+                          if (!v) return;
+                          try {
+                            await v.play();
+                            setNeedsUserGesture(false);
+                          } catch (e) {
+                            console.warn('User-gesture play() failed:', e);
+                          }
+                        }}
+                      >
+                        Tap to Start Live Video
+                      </Button>
+                    </div>
+                  )}
                   {(!camera.isLocal && camera.status === 'online' && viewerState === 'error') && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-white space-y-3">
                       <span className="text-sm">Could not connect to the remote camera.</span>

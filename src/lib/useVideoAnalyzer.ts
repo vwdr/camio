@@ -63,9 +63,12 @@ export function useVideoAnalyzer(options?: AnalyzerOptions) {
   // coco-ssd load() doesn't accept options in this package; use default load
   modelRef.current = await cocoSsd.load();
 
-      // MoveNet via pose-detection (SINGLEPOSE_LIGHTNING is fast); if it fails we continue without pose
+      // MoveNet via pose-detection (SinglePose.Lightning is fast); if it fails we continue without pose
       try {
-        poseRef.current = await posedetection.createDetector(posedetection.SupportedModels.MoveNet, { modelType: 'SINGLEPOSE_LIGHTNING' });
+        poseRef.current = await posedetection.createDetector(
+          posedetection.SupportedModels.MoveNet,
+          { modelType: 'SinglePose.Lightning' }
+        );
       } catch (e) {
         console.warn('Pose detector failed to initialize, continuing without pose detection', e);
         poseRef.current = null;
@@ -94,7 +97,7 @@ export function useVideoAnalyzer(options?: AnalyzerOptions) {
     if (!initializedRef.current) await initModels();
     if (!modelRef.current) return null;
 
-    const ctx = canvasEl.getContext('2d');
+  const ctx = (canvasEl.getContext as any)('2d', { willReadFrequently: true });
     if (!ctx) return null;
     const w = videoEl.videoWidth || 320;
     const h = videoEl.videoHeight || 240;

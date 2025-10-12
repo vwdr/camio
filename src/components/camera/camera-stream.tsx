@@ -77,6 +77,10 @@ export function CameraStream() {
   const [permissionHint, setPermissionHint] = useState<string>("");
   const signalingRef = useRef<SignalingServer | null>(null);
   const peerConnectionRef = useRef<PeerConnection | null>(null);
+  // Guard: ensure autostart runs only once (React Strict Mode mounts effects twice in dev)
+  const autostartRanRef = useRef<boolean>(false);
+  // Guard: ensure we only do one post-connect restart cycle
+  const postConnectRestartDoneRef = useRef<boolean>(false);
   const infoResponderAttachedRef = useRef(false);
   const activeViewerRef = useRef<string | null>(null);
   const offerInFlightViewerRef = useRef<string | null>(null);
@@ -291,6 +295,24 @@ export function CameraStream() {
         if (state === 'connected') {
           console.log('✅ Viewer connected to stream');
           activeViewerRef.current = peerConnectionRef.current?.getRemoteUserId() ?? activeViewerRef.current;
+          // Optional stabilization: after viewer is connected, perform a single stop/start to mimic manual fix
+          if (isExternal && autoStart && !postConnectRestartDoneRef.current) {
+            postConnectRestartDoneRef.current = true;
+            (async () => {
+              try {
+                // Small delay to allow viewer to render first frame
+                await new Promise((r) => setTimeout(r, 250));
+                if (!isStreamingRef.current) return;
+                console.log('🔁 Post-connect restart: stopping stream');
+                await toggleStreaming(); // stop
+                await new Promise((r) => setTimeout(r, 350));
+                console.log('🔁 Post-connect restart: starting stream');
+                await toggleStreaming();
+              } catch (e) {
+                console.warn('Post-connect restart failed:', e);
+              }
+            })();
+          }
         }
         if (state === 'disconnected' || state === 'failed' || state === 'closed') {
           console.log('❌ Viewer disconnected from stream');
@@ -382,11 +404,17 @@ export function CameraStream() {
 
   // Auto-start for external devices
   useEffect(() => {
-    if (isExternal && autoStart && !isStreaming) {
+    if (isExternal && autoStart && !isStreaming && !autostartRanRef.current) {
+      autostartRanRef.current = true;
       console.log('🚀 Auto-starting external device...');
       toggleStreaming();
     }
   }, [isExternal, autoStart, isStreaming]);
+
+  // After autostart completes, perform a one-time automatic restart to mimic pressing the button
+  // Some devices stabilize only after a start-stop-start cycle.
+  // (Removed) Auto-restart effect per user request; it could cause AbortError in some browsers when play()
+  // is interrupted by rapid srcObject changes. Keeping autostart-only behavior.
 
   // Start/stop streaming
   const toggleStreaming = async () => {
@@ -431,6 +459,11 @@ export function CameraStream() {
         
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
+          try {
+            const v = videoRef.current as HTMLVideoElement;
+            // Defer to next frame to avoid play() being interrupted by new load/srcObject
+            requestAnimationFrame(() => { v.play().catch(() => {}); });
+          } catch {}
         }
         
         console.log('📹 Local stream acquired, setting up remote streaming...');
@@ -589,6 +622,10 @@ export function CameraStream() {
         
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
+          try {
+            const v = videoRef.current as HTMLVideoElement;
+            requestAnimationFrame(() => { v.play().catch(() => {}); });
+          } catch {}
         }
         
         toast.success("Camera switched");

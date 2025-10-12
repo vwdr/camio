@@ -42,6 +42,8 @@ export default function PairPage() {
         params.set('camera', String(name || 'External Camera'));
         // forward the token so the streaming page knows which signaling id to use
         if (token) params.set('token', token);
+        // ensure the external device starts streaming immediately
+        params.set('autostart', 'true');
         router.push(`/dashboard/cameras/stream?${params.toString()}`);
       }, 2000);
     } catch (error) {
