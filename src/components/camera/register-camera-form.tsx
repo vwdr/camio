@@ -188,7 +188,9 @@ export function RegisterCameraForm() {
       }
     }
 
-    const ss = new SignalingServer(supabaseClient, uniqueToken);
+  // IMPORTANT: Use the per-stream channel scoped to this pairing token so the
+  // external device (which also uses `stream:<token>`) can reach this listener.
+  const ss = new SignalingServer(supabaseClient, uniqueToken, `stream:${uniqueToken}`);
 
     try {
       await ss.connect();
