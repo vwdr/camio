@@ -159,7 +159,11 @@ export function CameraStream() {
     }
 
     try {
-  const ss = new SignalingServer(supabase as SupabaseClient, streamId);
+  const ss = new SignalingServer(
+    supabase as SupabaseClient,
+    streamId,
+    `stream:${streamId}`
+  );
       await ss.connect();
       if (!infoResponderAttachedRef.current) {
         ss.onMessage(async (msg) => {

@@ -34,39 +34,41 @@ export class SignalingServer {
    */
   async connect(): Promise<void> {
     try {
-      // Create or check if the channel exists
-      const { error } = await this.supabase
-        .from('signaling_channels')
-        .upsert({ channel_name: this.channel }, { onConflict: 'channel_name' });
-
-      if (error) {
-        console.error('Error connecting to signaling channel:', error);
-        throw error;
+      // Clean up existing subscription first
+      if (this.subscription) {
+        console.log('🧹 Cleaning up existing subscription for:', this.userId);
+        await this.supabase.removeChannel(this.subscription);
+        this.subscription = null;
       }
 
-      // Subscribe to realtime updates for this channel
+      // Subscribe to a shared broadcast channel for all signaling
+      console.log('🔗 Setting up broadcast subscription for userId:', this.userId);
       this.subscription = this.supabase
-        .channel(`signaling:${this.channel}`)
-        .on('postgres_changes', {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'signaling_messages',
-          filter: `recipient=eq.${this.userId}`,
-  }, (payload: RealtimePostgresInsertPayload<SignalingMessageRow>) => {
-          if (payload.new) {
+        .channel(`signaling:${this.channel}`) // Shared channel for all users
+        .on(
+          'broadcast',
+          { event: 'signaling-message' },
+          (payload: { payload: SignalingMessage }) => {
+          console.log('🔥 SUBSCRIPTION TRIGGERED for userId:', this.userId, 'payload:', {
+            messageType: payload.payload?.type,
+            sender: payload.payload?.sender,
+            recipient: payload.payload?.recipient
+          });
+          
+          if (payload.payload && payload.payload.recipient === this.userId) {
+            console.log('📥 RAW MESSAGE RECEIVED:', {
+              type: payload.payload.type,
+              sender: payload.payload.sender, 
+              recipient: payload.payload.recipient,
+              myUserId: this.userId,
+              isForMe: payload.payload.recipient === this.userId
+            });
+            
             try {
-              // Normalize data: may already be an object (jsonb) or a JSON string
-              const raw = payload.new.data;
-              const normalizedData = typeof raw === 'string'
-                ? (() => { try { return JSON.parse(raw); } catch { return { value: raw }; } })()
-                : (raw ?? {});
+              // Broadcast payload already contains the structured message
+              const message: SignalingMessage = payload.payload;
 
-              const message: SignalingMessage = {
-                type: payload.new.message_type,
-                sender: payload.new.sender,
-                recipient: payload.new.recipient,
-                data: normalizedData as Record<string, unknown>
-              };
+              console.log('🔔 PROCESSING MESSAGE:', message.type, 'from:', message.sender);
 
               // fan-out to all listeners
               for (const cb of this.onMessageCallbacks) {
@@ -81,8 +83,14 @@ export class SignalingServer {
             }
           }
         })
-        .subscribe();
+        .subscribe((status, err) => {
+          console.log('🔄 Subscription status change:', status, 'for userId:', this.userId);
+          if (err) {
+            console.error('❌ Subscription error:', err);
+          }
+        });
 
+      console.log('📡 Subscription created for:', this.userId, 'channel:', `signaling:${this.channel}`);
       console.log(`Connected to signaling channel: ${this.channel}`);
     } catch (error) {
       console.error('Error setting up signaling server:', error);
@@ -103,32 +111,32 @@ export class SignalingServer {
       return;
     }
 
+    if (!this.subscription) {
+      throw new Error('Not connected to signaling server');
+    }
+
     try {
-      // Ensure data is JSON-serializable and store as proper jsonb
-      let jsonPayload: Record<string, unknown> = {};
-      try {
-        // This will deep-clone only serializable values
-        jsonPayload = data == null ? {} : JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
-      } catch (err) {
-        console.warn('Non-serializable data passed to sendMessage; sending empty object instead', err);
-        jsonPayload = {};
-      }
+      // Use the existing subscription channel to broadcast
+      const message: SignalingMessage = {
+        type,
+        sender: this.userId,
+        recipient: recipientId,
+        data
+      };
 
-      const { error } = await this.supabase
-        .from('signaling_messages')
-        .insert({
-          message_type: type,
-          sender: this.userId,
-          recipient: recipientId,
-          data: jsonPayload,
-          channel: this.channel,
-          created_at: new Date().toISOString()
-        });
+      const result = await this.subscription.send({
+        type: 'broadcast',
+        event: 'signaling-message',
+        payload: message
+      });
 
-      if (error) {
-        console.error('Error sending signaling message:', error);
-        throw error;
-      }
+      console.log('💾 BROADCAST SENT:', {
+        type,
+        sender: this.userId,
+        recipient: recipientId,
+        success: result === 'ok'
+      });
+
     } catch (error) {
       console.error('Error in sendMessage:', error);
       throw error;

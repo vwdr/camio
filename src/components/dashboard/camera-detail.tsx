@@ -55,6 +55,9 @@ export function CameraDetail({ camera }: CameraDetailProps) {
   const reconnectAttemptsRef = useRef<number>(0);
   const componentActiveRef = useRef(true);
   const streamerTargetRef = useRef<string | null>(camera.token ?? null);
+  const viewerIdRef = useRef<string | null>(null);
+  // Prevent parallel connection attempts
+  const connectingRef = useRef<boolean>(false);
 
   useEffect(() => {
     componentActiveRef.current = true;
@@ -106,9 +109,7 @@ export function CameraDetail({ camera }: CameraDetailProps) {
         if (msg.type === 'streamer-info' && isRecord(msg.data) && 'streamId' in msg.data) {
           const payload = msg.data as Record<string, unknown>;
           const streamId = String(payload.streamId);
-          const hasStream = payload.isStreaming === true
-            || payload.hasStream === true
-            || payload.hasStream === 'true';
+          const hasStream = Boolean(payload.hasStream);
           streamerTargetRef.current = streamId;
           lastKnownStreamId = streamId;
           lastHasStream = hasStream;
@@ -156,41 +157,33 @@ export function CameraDetail({ camera }: CameraDetailProps) {
 
   const waitForStreamerReady = async (ss: SignalingServer): Promise<string | null> => {
     let attempt = 0;
-    let fallbackId: string | null = null;
     while (componentActiveRef.current) {
       const info = await resolveStreamerTarget(ss);
       if (!componentActiveRef.current) {
-        return fallbackId;
+        return null;
       }
 
       if (!info) {
-        return fallbackId;
+        return null;
       }
 
       const { streamId, hasStream } = info;
       streamerTargetRef.current = streamId;
-      fallbackId = streamId;
 
       if (hasStream) {
-        console.log('✅ Streamer is ready and broadcasting, streamId:', streamId);
         return streamId;
       }
 
       if (attempt === 0) {
-        console.log('⏸️ Streamer responded but is not streaming yet; waiting for broadcast to start...');
+        console.log('Streamer responded but is not streaming yet; waiting for broadcast to start...');
       }
       attempt += 1;
-
-      if (attempt >= 3) {
-        console.log('⚠️ Streamer keeps reporting idle; attempting to connect anyway with latest stream ID:', streamId);
-        return streamId;
-      }
 
       // Wait briefly before requesting status again
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
 
-    return fallbackId;
+    return null;
   };
 
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
@@ -220,6 +213,13 @@ export function CameraDetail({ camera }: CameraDetailProps) {
       reconnectAttemptsRef.current = 0;
     }
 
+    // Guard against parallel connection attempts
+    if (connectingRef.current && !retry) {
+      console.log('⏳ Connection already in progress, skipping duplicate attempt');
+      return;
+    }
+    connectingRef.current = true;
+
     // Tear down any existing connection before creating a new one
     if (pcRef.current) {
       try { pcRef.current.close(); } catch (e) { console.error('Error closing previous peer connection', e); }
@@ -232,9 +232,29 @@ export function CameraDetail({ camera }: CameraDetailProps) {
 
     setViewerState('connecting');
 
-    try {
-      const viewerId = `viewer-${Math.random().toString(36).substring(2, 10)}`;
-      const ss = new SignalingServer(supabase as SupabaseClient, viewerId);
+  try {
+      // Use consistent viewerId to maintain connection with streamer - persist across sessions
+      if (!viewerIdRef.current) {
+        // Try to get existing viewer ID from localStorage first
+        const storedViewerId = localStorage.getItem(`camio-viewer-${camera.id}`);
+        if (storedViewerId) {
+          viewerIdRef.current = storedViewerId;
+          console.log('🆔 Retrieved stored viewer ID:', viewerIdRef.current);
+        } else {
+          // Generate new viewer ID and store it
+          viewerIdRef.current = `viewer-${Math.random().toString(36).substring(2, 10)}`;
+          localStorage.setItem(`camio-viewer-${camera.id}`, viewerIdRef.current);
+          console.log('🆔 Generated new viewer ID:', viewerIdRef.current);
+        }
+      }
+      console.log('🆔 Using viewer ID:', viewerIdRef.current);
+      // Join the same stream-specific channel as the streamer
+      const streamChannel = streamerTargetRef.current ?? camera.token ?? camera.id;
+      const ss = new SignalingServer(
+        supabase as SupabaseClient,
+        viewerIdRef.current,
+        `stream:${streamChannel}`
+      );
       await ss.connect();
       if (!componentActiveRef.current) {
         ss.disconnect();
@@ -242,10 +262,21 @@ export function CameraDetail({ camera }: CameraDetailProps) {
       }
       signalingRef.current = ss;
 
-      console.log('🔗 Creating viewer peer connection for camera', camera.id);
+      const resolvedStreamId = await waitForStreamerReady(ss);
+      if (!componentActiveRef.current) {
+        ss.disconnect();
+        return;
+      }
+
+      if (!resolvedStreamId) {
+        console.warn('Unable to determine streamer target for camera', camera.id);
+        setViewerState('error');
+        ss.disconnect();
+        return;
+      }
+
       const peer = new PeerConnection(ss, undefined, {
         onConnectionStateChange: (state) => {
-          console.log('📡 Viewer connection state changed to:', state);
           if (state === 'connected') {
             setViewerState('connected');
             reconnectAttemptsRef.current = 0;
@@ -299,33 +330,10 @@ export function CameraDetail({ camera }: CameraDetailProps) {
 
       pcRef.current = peer;
 
-      console.log('🔍 Waiting for streamer to be ready...');
-      const resolvedStreamId = await waitForStreamerReady(ss);
-      if (!componentActiveRef.current) {
-        console.log('❌ Component unmounted during wait, cleaning up');
-        peer.close();
-        ss.disconnect();
-        signalingRef.current = null;
-        pcRef.current = null;
-        return;
-      }
-
-      if (!resolvedStreamId) {
-        console.warn('❌ Unable to determine streamer target for camera', camera.id);
-        setViewerState('error');
-        peer.close();
-        signalingRef.current = null;
-        pcRef.current = null;
-        ss.disconnect();
-        return;
-      }
-
-      console.log('🎯 Initializing viewer with streamer ID:', resolvedStreamId);
       try {
         await peer.initializeAsViewer(resolvedStreamId);
-        console.log('✅ Viewer initialized successfully');
       } catch (connectionError) {
-        console.error('❌ Failed to initialize viewer peer connection:', connectionError);
+        console.error('Failed to initialize viewer peer connection:', connectionError);
         setViewerState('error');
         if (reconnectAttemptsRef.current < 5 && camera.status === 'online') {
           setTimeout(() => {
@@ -345,6 +353,8 @@ export function CameraDetail({ camera }: CameraDetailProps) {
           }
         }, 2000);
       }
+    } finally {
+      connectingRef.current = false;
     }
   };
 
@@ -456,7 +466,7 @@ export function CameraDetail({ camera }: CameraDetailProps) {
       setViewerState('idle');
       analyzerStop();
     };
-  }, [camera.id, camera.isLocal, camera.isRecording, camera.status, camera.token]);
+  }, [camera.id, camera.isLocal, camera.isRecording]);
 
   // start/stop analyzer when appropriate
   useEffect(() => {

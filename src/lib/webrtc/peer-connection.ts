@@ -55,7 +55,14 @@ export class PeerConnection {
   private isInitiator: boolean = false;
   private connectionTimeout: number = 30000; // 30 seconds timeout for connections
   private iceCandidateQueue: RTCIceCandidate[] = [];
-
+  
+  // Message deduplication tracking
+  private processedMessages = new Set<string>();
+  private messageTimeout = 5000; // 5 seconds to remember processed messages
+  // Viewer-connect timers (for viewer role)
+  private viewerConnectIntervalId: ReturnType<typeof setInterval> | null = null;
+  private viewerConnectTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  
   constructor(
     signaling: SignalingServer, 
     config: RTCConfiguration = {
@@ -189,9 +196,31 @@ export class PeerConnection {
 
   private setupSignalingListeners(): void {
     this.signaling.onMessage(async (message) => {
+      console.log('🎯 PEER CONNECTION RECEIVED:', message.type, 'from:', message.sender);
+      
+      // Generate unique message ID for deduplication
+      const messageId = `${message.sender}-${message.type}-${Date.now()}`;
+      const contentHash = JSON.stringify(message.data).substring(0, 50);
+      const dedupKey = `${message.sender}-${message.type}-${contentHash}`;
+      
+      // Check if we've already processed this message recently
+      if (this.processedMessages.has(dedupKey)) {
+        console.log('🔄 Skipping duplicate message:', message.type, 'from:', message.sender);
+        return;
+      }
+      
+      // Mark message as processed
+      this.processedMessages.add(dedupKey);
+      
+      // Clean up old message tracking after timeout
+      setTimeout(() => {
+        this.processedMessages.delete(dedupKey);
+      }, this.messageTimeout);
+      
       try {
         switch (message.type) {
           case 'offer':
+            console.log('📨 PROCESSING OFFER from:', message.sender);
             if (isOfferPayload(message.data)) {
               await this.handleOffer(message.data, message.sender);
             } else {
@@ -280,6 +309,21 @@ export class PeerConnection {
     console.log('🎬 initializeAsStreamer called for viewer:', remoteUserId);
     console.log('Current state - connection:', this.peerConnection.connectionState, 'signaling:', this.peerConnection.signalingState);
     console.log('Current remoteUserId:', this.remoteUserId, 'tracks added:', this.localTracksAdded);
+    
+    // Check if we're already connected to this viewer
+    if (this.remoteUserId === remoteUserId && 
+        this.peerConnection.connectionState === 'connected' &&
+        this.peerConnection.signalingState === 'stable') {
+      console.log('✅ Already connected to viewer', remoteUserId, '- skipping reinitialization');
+      return;
+    }
+    
+    // Check if we're already in the process of connecting to this viewer
+    if (this.remoteUserId === remoteUserId && 
+        this.peerConnection.signalingState === 'have-local-offer') {
+      console.log('⏳ Already sent offer to viewer', remoteUserId, '- skipping duplicate initialization');
+      return;
+    }
     
     // Only reset if we're connecting to a DIFFERENT viewer or connection is completely broken
     const needsReset = (this.remoteUserId && this.remoteUserId !== remoteUserId) ||
@@ -383,8 +427,15 @@ export class PeerConnection {
     this.remoteUserId = streamerId;
     
     return new Promise((resolve, reject) => {
-      let timeoutId: ReturnType<typeof setTimeout>;
-      let resendIntervalId: ReturnType<typeof setInterval> | null = null;
+      // Clear any existing timers before starting new ones
+      if (this.viewerConnectIntervalId) {
+        clearInterval(this.viewerConnectIntervalId);
+        this.viewerConnectIntervalId = null;
+      }
+      if (this.viewerConnectTimeoutId) {
+        clearTimeout(this.viewerConnectTimeoutId);
+        this.viewerConnectTimeoutId = null;
+      }
       let connectionTimedOut = false;
       let connectionEstablished = false;
       
@@ -397,10 +448,13 @@ export class PeerConnection {
           connectionEstablished = true;
           
           // Clear timeout since we got a track
-          clearTimeout(timeoutId);
-          if (resendIntervalId) {
-            clearInterval(resendIntervalId);
-            resendIntervalId = null;
+          if (this.viewerConnectTimeoutId) {
+            clearTimeout(this.viewerConnectTimeoutId);
+            this.viewerConnectTimeoutId = null;
+          }
+          if (this.viewerConnectIntervalId) {
+            clearInterval(this.viewerConnectIntervalId);
+            this.viewerConnectIntervalId = null;
           }
           
           // Check if the stream has video and audio
@@ -415,6 +469,12 @@ export class PeerConnection {
           }
           
           this.remoteStream = mediaStream;
+          // Propagate to consumer so UI can attach and play the stream
+          try {
+            this.callbacks.onRemoteStream?.(mediaStream);
+          } catch (cbErr) {
+            console.warn('onRemoteStream callback threw', cbErr);
+          }
           resolve(mediaStream);
         };
         
@@ -425,12 +485,15 @@ export class PeerConnection {
           
           if (state === 'failed' || state === 'disconnected' || state === 'closed') {
             if (!connectionEstablished) {
-              if (resendIntervalId) {
-                clearInterval(resendIntervalId);
-                resendIntervalId = null;
+              if (this.viewerConnectIntervalId) {
+                clearInterval(this.viewerConnectIntervalId);
+                this.viewerConnectIntervalId = null;
               }
               reject(new Error(`ICE connection failed: ${state}`));
-              clearTimeout(timeoutId);
+              if (this.viewerConnectTimeoutId) {
+                clearTimeout(this.viewerConnectTimeoutId);
+                this.viewerConnectTimeoutId = null;
+              }
             } else if (this.callbacks.onConnectionStateChange) {
               this.callbacks.onConnectionStateChange(this.peerConnection.connectionState);
             }
@@ -453,15 +516,15 @@ export class PeerConnection {
         };
 
         sendViewerConnect();
-        resendIntervalId = setInterval(sendViewerConnect, 5000);
+        this.viewerConnectIntervalId = setInterval(sendViewerConnect, 5000);
         
         // Set up a timeout in case we don't get a response
-        timeoutId = setTimeout(() => {
+        this.viewerConnectTimeoutId = setTimeout(() => {
           connectionTimedOut = true;
           console.log('Connection attempt timed out');
-          if (resendIntervalId) {
-            clearInterval(resendIntervalId);
-            resendIntervalId = null;
+          if (this.viewerConnectIntervalId) {
+            clearInterval(this.viewerConnectIntervalId);
+            this.viewerConnectIntervalId = null;
           }
           reject(new Error('Connection timed out waiting for streamer response'));
         }, this.connectionTimeout);
@@ -470,9 +533,9 @@ export class PeerConnection {
         const normalized = normalizeError(error);
         console.error('Error in initializeAsViewer:', normalized);
         this.callbacks.onError?.(new Error(`Failed to initialize as viewer: ${normalized.message}`));
-        if (resendIntervalId) {
-          clearInterval(resendIntervalId);
-          resendIntervalId = null;
+        if (this.viewerConnectIntervalId) {
+          clearInterval(this.viewerConnectIntervalId);
+          this.viewerConnectIntervalId = null;
         }
         reject(normalized);
       }
@@ -485,6 +548,30 @@ export class PeerConnection {
   private async handleOffer(data: OfferPayload, sender: string): Promise<void> {
     console.log('📥 Received offer from', sender);
     console.log('Offer SDP type:', data.sdp.type, 'length:', data.sdp.sdp?.length);
+    
+    // If we're the viewer and were retrying viewer-connect, stop retrying once an offer arrives
+    if (this.viewerConnectIntervalId) {
+      clearInterval(this.viewerConnectIntervalId);
+      this.viewerConnectIntervalId = null;
+    }
+    if (this.viewerConnectTimeoutId) {
+      clearTimeout(this.viewerConnectTimeoutId);
+      this.viewerConnectTimeoutId = null;
+    }
+    
+    // Check if we're already connected/processed an offer
+    const currentState = this.peerConnection.signalingState;
+    const hasRemoteDescription = !!this.peerConnection.remoteDescription;
+    // Only treat as duplicate if we've already set a remote description for this sender
+    if (currentState === 'stable' && hasRemoteDescription && this.remoteUserId === sender) {
+      console.log('🔄 Ignoring duplicate offer - already connected to', sender);
+      return;
+    }
+    
+    if (currentState === 'have-remote-offer') {
+      console.log('🔄 Already processing an offer - ignoring duplicate');
+      return;
+    }
     
     this.remoteUserId = sender;
 
@@ -511,6 +598,13 @@ export class PeerConnection {
   private async handleAnswer(data: AnswerPayload): Promise<void> {
     console.log('📥 Received answer from viewer');
     console.log('Answer SDP type:', data.sdp.type, 'length:', data.sdp.sdp?.length);
+    
+    // Check if we're in the correct state to receive an answer
+    const currentState = this.peerConnection.signalingState;
+    if (currentState !== 'have-local-offer') {
+      console.log(`🔄 Ignoring answer - wrong state: ${currentState} (expected: have-local-offer)`);
+      return;
+    }
     
     await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
     console.log('✅ Remote description (answer) set successfully');
@@ -571,6 +665,15 @@ export class PeerConnection {
       this.peerConnection.oniceconnectionstatechange = null;
       this.peerConnection.onicegatheringstatechange = null;
       this.peerConnection.onsignalingstatechange = null;
+      // Clear any viewer-connect timers
+      if (this.viewerConnectIntervalId) {
+        clearInterval(this.viewerConnectIntervalId);
+        this.viewerConnectIntervalId = null;
+      }
+      if (this.viewerConnectTimeoutId) {
+        clearTimeout(this.viewerConnectTimeoutId);
+        this.viewerConnectTimeoutId = null;
+      }
       
       // Close the peer connection
       this.peerConnection.close();
