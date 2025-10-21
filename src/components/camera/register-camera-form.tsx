@@ -415,33 +415,24 @@ export function RegisterCameraForm() {
                     initial={{ opacity: 0, scale: 0.95 }} 
                     animate={{ opacity: 1, scale: 1 }}
                     transition={{ type: "spring", stiffness: 200, damping: 15 }}
-                    className="w-full max-w-md bg-white rounded-lg p-4 shadow-md"
+                    className="w-full max-w-md rounded-lg p-4"
                   >
                     <div className="flex flex-col items-center gap-3">
-                      <div className="bg-white p-2 rounded-md">
+                      <div className="p-2 rounded-md">
                         <QRCodeSVG value={qrCode} size={180} />
                       </div>
                       <div className="text-center">
                         <p className="text-sm text-muted-foreground">
                           Scan this code with your device to connect.
                         </p>
-                        <a 
-                          href={qrCode}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="block text-sm text-primary underline mt-2 truncate max-w-xs"
-                        >
-                          {qrCode}
-                        </a>
                       </div>
                     </div>
                   </motion.div>
                 )}
               </div>
 
-              <div className="flex-shrink-0">
-                {/* For current/local device show Register; for external scanning flow we hide the submit because
-                    the dashboard will wait for the external device to 'register' itself via signaling. */}
+              <div className="flex-shrink-0 w-full md:w-auto">
+                {/* For current/local device show Register; for external scanning flow we show the pairing link UI after QR generation */}
                 {form.watch('deviceType') === 'current' ? (
                   <Button 
                     type="submit" 
@@ -459,10 +450,39 @@ export function RegisterCameraForm() {
                     )}
                     Register Camera
                   </Button>
-                ) : (
-                  <div className="text-sm text-muted-foreground">
-                    {waitingForDevice ? 'Waiting for device to complete registration...' : 'Generate the QR to start pairing.'}
+                ) : qrCode ? (
+                  <div className="sm:min-w-[280px]">
+                    <div className="flex flex-col gap-2">
+                      <div className="text-xs text-muted-foreground">Pairing</div>
+                      <div className="flex items-center gap-3">
+                        <a
+                          href={qrCode}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-primary underline"
+                        >
+                          Pairing link
+                        </a>
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          title="Copy link"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(qrCode);
+                              toast.success('Link copied');
+                            } catch (e) {
+                              console.warn('Copy failed', e);
+                            }
+                          }}
+                        >
+                          <Copy className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
+                ) : (
+                  <div className="text-sm text-muted-foreground">Generate the QR to start pairing.</div>
                 )}
               </div>
             </motion.div>

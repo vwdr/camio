@@ -7,7 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { PlusCircle, AlertTriangle } from "lucide-react";
 import { motion } from "framer-motion";
-import { loadCameras, Camera as StorageCamera } from "@/lib/storage";
+import { loadCameras, saveCameras, Camera as StorageCamera } from "@/lib/storage";
 
 // Metadata is now defined in layout.tsx for client components
 
@@ -128,7 +128,27 @@ export default function DashboardPage() {
         <div className="flex items-center justify-between">
           <h3 className="text-xl font-semibold">Your Cameras</h3>
           <motion.div whileHover={{ x: 2 }} whileTap={{ scale: 0.98 }}>
-            <Button variant="ghost" size="sm">View All</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                try {
+                  if (!confirm('Clear all cameras? This will remove all cameras and their local recordings.')) return;
+                  const current = loadCameras();
+                  // Remove local recording blobs for each camera
+                  current.forEach((c) => {
+                    try { localStorage.removeItem(`camio:recordings:${c.id}`); } catch {}
+                  });
+                  // Clear camera list
+                  saveCameras([]);
+                  setCameras([]);
+                } catch (e) {
+                  console.error('Failed to clear all cameras', e);
+                }
+              }}
+            >
+              Clear All
+            </Button>
           </motion.div>
         </div>
         <motion.div 

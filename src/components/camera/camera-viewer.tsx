@@ -6,7 +6,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { 
   Camera, 
   Volume2,
-  VolumeX
+  VolumeX,
+  Loader2
 } from "lucide-react";
 import { toast } from "sonner";
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
@@ -57,11 +58,6 @@ export function CameraViewer() {
         const ss = new SignalingServer(supabaseClient, viewerId);
         await ss.connect();
         setSignaling(ss);
-
-        if (pcRef.current) {
-          try { pcRef.current.close(); } catch (err) { console.warn('Failed to close previous peer connection', err); }
-          pcRef.current = null;
-        }
 
         const pc = new PeerConnection(ss, undefined, {
           onError: (e) => { console.error('Viewer PC error', e); toast.error('Connection error'); },

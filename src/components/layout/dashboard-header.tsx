@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -28,6 +28,10 @@ import {
 
 export default function DashboardHeader() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [userName, setUserName] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [initials, setInitials] = useState<string>("U");
   const pathname = usePathname();
   const router = useRouter();
 
@@ -114,6 +118,74 @@ export default function DashboardHeader() {
     staggerChildren: 0.05
   };
 
+  // Load current user info for avatar/menu
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    (async () => {
+      try {
+        const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+        if (!isSupabaseConfigured || !('auth' in supabase)) return;
+
+        // Helper to compute initials
+        const computeInitials = (name?: string | null, email?: string | null) => {
+          const n = (name || '').trim();
+          if (n) {
+            const parts = n.split(/\s+/).filter(Boolean);
+            const first = parts[0]?.[0] || '';
+            const last = parts.length > 1 ? parts[parts.length - 1]?.[0] || '' : '';
+            return (first + last).toUpperCase() || 'U';
+          }
+          const e = (email || '').trim();
+          return e ? e[0]?.toUpperCase() || 'U' : 'U';
+        };
+
+        // Initial fetch
+        try {
+          const { data } = await (supabase as any).auth.getUser();
+          const user = data?.user ?? null;
+          if (user) {
+            const meta = (user.user_metadata || {}) as Record<string, any>;
+            const name = meta.full_name || meta.name || meta.user_name || null;
+            const email = user.email || null;
+            const avatar = meta.avatar_url || meta.picture || null;
+            setUserName(name);
+            setUserEmail(email);
+            setAvatarUrl(avatar);
+            setInitials(computeInitials(name, email));
+          }
+        } catch {
+          // ignore
+        }
+
+        // Subscribe to auth state changes
+        const { data: listener } = (supabase as any).auth.onAuthStateChange((_event: any, session: any) => {
+          const user = session?.user ?? null;
+          if (user) {
+            const meta = (user.user_metadata || {}) as Record<string, any>;
+            const name = meta.full_name || meta.name || meta.user_name || null;
+            const email = user.email || null;
+            const avatar = meta.avatar_url || meta.picture || null;
+            setUserName(name);
+            setUserEmail(email);
+            setAvatarUrl(avatar);
+            setInitials(computeInitials(name, email));
+          } else {
+            setUserName(null);
+            setUserEmail(null);
+            setAvatarUrl(null);
+            setInitials('U');
+          }
+        });
+        unsub = () => {
+          try { listener?.subscription?.unsubscribe?.(); } catch {}
+        };
+      } catch (e) {
+        // ignore if supabase not available
+      }
+    })();
+    return () => { if (unsub) unsub(); };
+  }, []);
+
   return (
     <motion.header 
       className="sticky top-0 z-30 border-b bg-background"
@@ -191,8 +263,8 @@ export default function DashboardHeader() {
               <motion.div whileHover={{ scale: 1.05 }}>
                 <Button variant="ghost" className="relative h-8 w-8 rounded-full">
                   <Avatar className="h-8 w-8">
-                    <AvatarImage src="" alt="User" />
-                    <AvatarFallback>JD</AvatarFallback>
+                    <AvatarImage src={avatarUrl || undefined} alt={userName || userEmail || 'User'} />
+                    <AvatarFallback>{initials}</AvatarFallback>
                   </Avatar>
                 </Button>
               </motion.div>
@@ -200,10 +272,12 @@ export default function DashboardHeader() {
             <DropdownMenuContent className="w-56" align="end" forceMount>
               <DropdownMenuLabel className="font-normal">
                 <div className="flex flex-col space-y-1">
-                  <p className="text-sm font-medium leading-none">John Doe</p>
-                  <p className="text-xs leading-none text-muted-foreground">
-                    john.doe@example.com
-                  </p>
+                  <p className="text-sm font-medium leading-none">{userName || userEmail || 'Not signed in'}</p>
+                  {userEmail && (
+                    <p className="text-xs leading-none text-muted-foreground">
+                      {userEmail}
+                    </p>
+                  )}
                 </div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />

@@ -4,7 +4,8 @@ import { useState, useRef, useEffect } from "react";
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { PlayCircle, PauseCircle, Volume2, VolumeX, Maximize, MessageSquare } from "lucide-react";
+import { PlayCircle, PauseCircle, Volume2, VolumeX, Maximize, MessageSquare, Copy } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { motion, AnimatePresence } from "framer-motion";
@@ -45,6 +46,10 @@ export function CameraDetail({ camera }: CameraDetailProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  // Reconnect link + QR (public base preferred when available)
+  const [lanBaseUrl, setLanBaseUrl] = useState<string | null>(null);
+  const [publicBaseReachable, setPublicBaseReachable] = useState<boolean | null>(null);
+  const [reconnectUrl, setReconnectUrl] = useState<string | null>(null);
   // Fallback: show a tap overlay only if autoplay fails after robust retries
   const [needsUserGesture, setNeedsUserGesture] = useState(false);
   
@@ -462,6 +467,75 @@ export function CameraDetail({ camera }: CameraDetailProps) {
     })();
     return () => { mounted = false; if (recordingUrl && recordingUrl.startsWith('blob:')) URL.revokeObjectURL(recordingUrl); };
   }, [camera.id]);
+
+  // Resolve LAN base URL once
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/base-url');
+        if (res.ok) {
+          const data = await res.json();
+          setLanBaseUrl(data.baseUrl || null);
+        }
+      } catch (e) {
+        setLanBaseUrl(null);
+      }
+    })();
+  }, []);
+
+  // Probe public base URL (e.g., ngrok) if configured
+  useEffect(() => {
+    const publicBase = (typeof window !== 'undefined' && (window as any).__NEXT_PUBLIC_BASE_URL)
+      || (typeof process !== 'undefined' && (process as any).env && (process as any).env.NEXT_PUBLIC_BASE_URL)
+      || null;
+    if (!publicBase) {
+      setPublicBaseReachable(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        await fetch(publicBase, { method: 'GET', mode: 'no-cors' as RequestMode });
+        if (!cancelled) setPublicBaseReachable(true);
+      } catch {
+        if (!cancelled) setPublicBaseReachable(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Build reconnect URL (external cameras only)
+  useEffect(() => {
+    if (camera.isLocal) { setReconnectUrl(null); return; }
+    const token = camera.token;
+    if (!token || !camera.name) { setReconnectUrl(null); return; }
+
+    const publicBase = (typeof window !== 'undefined' && (window as any).__NEXT_PUBLIC_BASE_URL)
+      || (typeof process !== 'undefined' && (process as any).env && (process as any).env.NEXT_PUBLIC_BASE_URL)
+      || null;
+
+    let base: string;
+    if (publicBase && publicBaseReachable === true) {
+      base = publicBase;
+    } else if (lanBaseUrl) {
+      base = lanBaseUrl;
+    } else if (typeof window !== 'undefined') {
+      base = `${window.location.protocol}//${window.location.host}`;
+    } else {
+      base = '';
+    }
+
+    if (base) {
+      const params = new URLSearchParams();
+      params.set('external', 'true');
+      params.set('token', token);
+      params.set('camera', camera.name);
+      params.set('autostart', 'true');
+      setReconnectUrl(`${base}/stream?${params.toString()}`);
+    } else {
+      setReconnectUrl(null);
+    }
+  }, [camera.isLocal, camera.token, camera.name, lanBaseUrl, publicBaseReachable]);
 
   // Attach shared live stream for local cameras so both card and portal can see realtime feed
   useEffect(() => {
@@ -952,6 +1026,64 @@ export function CameraDetail({ camera }: CameraDetailProps) {
                   alert('Download functionality not implemented yet');
                 }}>Download</Button>
               </div>
+
+              {/* Reconnect area for external devices */}
+              {!camera.isLocal && camera.token && (
+                <div className="mt-6 border-t pt-4">
+                  <h4 className="font-medium mb-2">Reconnect External Device</h4>
+                  <p className="text-sm text-muted-foreground mb-3">
+                    If your device disconnects, open this link or scan the QR on the device to resume streaming.
+                  </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
+                      <div className="flex justify-center sm:justify-start">
+                        <div className="p-2 rounded-md">
+                          <QRCodeSVG value={reconnectUrl || ''} size={128} />
+                        </div>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <div className="flex flex-col gap-2">
+                          <div className="text-xs text-muted-foreground">Pairing</div>
+                          <div className="flex items-center gap-3">
+                            {reconnectUrl ? (
+                              <a
+                                href={reconnectUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-sm underline text-primary"
+                              >
+                                Pairing link
+                              </a>
+                            ) : (
+                              <span className="text-sm text-muted-foreground">Resolving…</span>
+                            )}
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              title="Copy link"
+                              onClick={async () => {
+                                try {
+                                  if (reconnectUrl) {
+                                    await navigator.clipboard.writeText(reconnectUrl);
+                                    alert('Link copied');
+                                  }
+                                } catch (e) {
+                                  console.warn('Copy failed', e);
+                                }
+                              }}
+                            >
+                              <Copy className="h-4 w-4" />
+                            </Button>
+                          </div>
+                          {publicBaseReachable === false && (
+                            <div className="text-xs text-yellow-600">
+                              Public base URL appears offline. Using local network address instead.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
