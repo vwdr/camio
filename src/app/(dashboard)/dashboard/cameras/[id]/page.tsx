@@ -7,7 +7,7 @@ import { Timeline } from "@/components/dashboard/timeline";
 import { getTimeline } from '@/lib/timeline';
 import { loadCameras, Camera as StorageCamera } from '@/lib/storage';
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Download } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 
 // Define camera interface for CameraDetail component
@@ -175,10 +175,7 @@ export default function CameraDetailPage() {
             {camera.status}
           </div>
         </div>
-        <Button variant="outline" disabled={camera.status !== "online"}>
-          <Download className="mr-2 h-4 w-4" />
-          Download Footage
-        </Button>
+        {/* Download button removed per request */}
       </div>
       
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

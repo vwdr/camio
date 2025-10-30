@@ -1001,35 +1001,9 @@ export function CameraDetail({ camera }: CameraDetailProps) {
         >
           <Card>
             <CardContent className="p-4">
-              <h3 className="font-medium mb-4">Recording Controls</h3>
-              <p className="text-sm text-muted-foreground mb-3">The camera is {camera.status === 'online' ? 'online' : 'offline'} and {camera.isRecording ? 'recording' : 'not recording'}.</p>
-              <div className="flex justify-center gap-2">{/* centered controls */}
-                <Button onClick={async () => {
-                  // toggle recording state in localStorage
-                  try {
-                    const { loadCameras, saveCameras } = await import('@/lib/storage');
-                    const list = loadCameras();
-                    const idx = list.findIndex((c) => c.id === camera.id);
-                    if (idx !== -1) {
-                      list[idx].isRecording = !list[idx].isRecording;
-                      saveCameras(list);
-                      window.location.reload();
-                    }
-                  } catch (e) {
-                    console.error('Failed to toggle recording', e);
-                  }
-                }}>
-                  {camera.isRecording ? 'Stop Recording' : 'Start Recording'}
-                </Button>
-                <Button variant="outline" onClick={() => {
-                  // quick download placeholder: capture current frame if available
-                  alert('Download functionality not implemented yet');
-                }}>Download</Button>
-              </div>
-
               {/* Reconnect area for external devices */}
               {!camera.isLocal && camera.token && (
-                <div className="mt-6 border-t pt-4">
+                <div>
                   <h4 className="font-medium mb-2">Reconnect External Device</h4>
                   <p className="text-sm text-muted-foreground mb-3">
                     If your device disconnects, open this link or scan the QR on the device to resume streaming.
