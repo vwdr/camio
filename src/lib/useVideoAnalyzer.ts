@@ -6,6 +6,7 @@ import '@tensorflow/tfjs-backend-webgl';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 import * as posedetection from '@tensorflow-models/pose-detection';
 import type { Pose } from '@tensorflow-models/pose-detection';
+import { detectWeapons, initWeaponDetector } from '@/lib/ai/weapon-detector';
 
 export type Detection = {
   label: string;
@@ -55,6 +56,9 @@ export function useVideoAnalyzer(options?: AnalyzerOptions) {
     if (initializedRef.current) return;
     setLoadingModels(true);
     try {
+      // Import config to check what's enabled
+      const { VIDEO_ANALYZER_CONFIG: config } = await import('@/lib/ai/detection-config');
+      
       await tf.ready();
       // prefer webgl for performance when available
       try { await tf.setBackend('webgl'); } catch (e) {}
@@ -63,15 +67,29 @@ export function useVideoAnalyzer(options?: AnalyzerOptions) {
   // coco-ssd load() doesn't accept options in this package; use default load
   modelRef.current = await cocoSsd.load();
 
-      // MoveNet via pose-detection (SinglePose.Lightning is fast); if it fails we continue without pose
-      try {
-        poseRef.current = await posedetection.createDetector(
-          posedetection.SupportedModels.MoveNet,
-          { modelType: 'SinglePose.Lightning' }
-        );
-      } catch (e) {
-        console.warn('Pose detector failed to initialize, continuing without pose detection', e);
+      // MoveNet via pose-detection (SinglePose.Lightning is fast) - only if enabled
+      if (config.enablePoseDetection) {
+        try {
+          poseRef.current = await posedetection.createDetector(
+            posedetection.SupportedModels.MoveNet,
+            { modelType: 'SinglePose.Lightning' }
+          );
+        } catch (e) {
+          console.warn('Pose detector failed to initialize, continuing without pose detection', e);
+          poseRef.current = null;
+        }
+      } else {
         poseRef.current = null;
+      }
+
+      // Initialize weapon detector (open-source model) - only if enabled
+      if (config.enableWeaponDetection) {
+        try {
+          await initWeaponDetector();
+          console.log('Weapon detector initialized');
+        } catch (e) {
+          console.warn('Weapon detector failed to initialize, continuing without weapon detection', e);
+        }
       }
 
       // Warm up models with a tiny tensor to compile shaders
@@ -96,6 +114,9 @@ export function useVideoAnalyzer(options?: AnalyzerOptions) {
     if (!enabled) return null;
     if (!initializedRef.current) await initModels();
     if (!modelRef.current) return null;
+
+    // Import config once at the beginning
+    const { VIDEO_ANALYZER_CONFIG: config } = await import('@/lib/ai/detection-config');
 
   const ctx = (canvasEl.getContext as any)('2d', { willReadFrequently: true });
     if (!ctx) return null;
@@ -128,56 +149,91 @@ export function useVideoAnalyzer(options?: AnalyzerOptions) {
 
     // bleeding heuristic: sample pixels inside each person box at a grid step
     const bleedingForBoxes: boolean[] = [];
-    try {
-      const img = ctx.getImageData(0, 0, w, h);
-      const data = img.data;
-      for (const d of personBoxes) {
-        const x0 = Math.max(0, Math.floor(d.bbox.x * w));
-        const y0 = Math.max(0, Math.floor(d.bbox.y * h));
-        const x1 = Math.min(w, x0 + Math.floor(d.bbox.width * w));
-        const y1 = Math.min(h, y0 + Math.floor(d.bbox.height * h));
-        let redCount = 0;
-        let total = 0;
-        const step = Math.max(4, Math.floor(Math.min(8, Math.max(1, Math.floor((x1 - x0) / 20)))));
-        for (let yy = y0; yy < y1; yy += step) {
-          for (let xx = x0; xx < x1; xx += step) {
-            const idx = (yy * w + xx) * 4;
-            const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-            if (r > 140 && r > g + 30 && r > b + 30) redCount++;
-            total++;
+    if (config.enableBleedingDetection) {
+      try {
+        const img = ctx.getImageData(0, 0, w, h);
+        const data = img.data;
+        for (const d of personBoxes) {
+          const x0 = Math.max(0, Math.floor(d.bbox.x * w));
+          const y0 = Math.max(0, Math.floor(d.bbox.y * h));
+          const x1 = Math.min(w, x0 + Math.floor(d.bbox.width * w));
+          const y1 = Math.min(h, y0 + Math.floor(d.bbox.height * h));
+          let redCount = 0;
+          let total = 0;
+          const step = Math.max(4, Math.floor(Math.min(8, Math.max(1, Math.floor((x1 - x0) / 20)))));
+          for (let yy = y0; yy < y1; yy += step) {
+            for (let xx = x0; xx < x1; xx += step) {
+              const idx = (yy * w + xx) * 4;
+              const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+              if (r > 140 && r > g + 30 && r > b + 30) redCount++;
+              total++;
+            }
           }
+          bleedingForBoxes.push(total > 0 && (redCount / total) > 0.12);
         }
-        bleedingForBoxes.push(total > 0 && (redCount / total) > 0.12);
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
 
     // Fallen heuristic per pose: compute aspect ratio of keypoints bbox
     const fallenForPoses: boolean[] = [];
-    try {
-      for (const pose of poses) {
-        const keypoints = pose.keypoints || [];
-        const ys = keypoints.map((k: any) => k.y || 0);
-        const xs = keypoints.map((k: any) => k.x || 0);
-        if (ys.length && xs.length) {
-          const minY = Math.min(...ys);
-          const maxY = Math.max(...ys);
-          const minX = Math.min(...xs);
-          const maxX = Math.max(...xs);
-          const ph = Math.max(1, maxY - minY);
-          const pw = Math.max(1, maxX - minX);
-          const aspect = ph / pw;
-          fallenForPoses.push(aspect < 0.6);
+    if (config.enablePoseDetection) {
+      try {
+        for (const pose of poses) {
+          const keypoints = pose.keypoints || [];
+          const ys = keypoints.map((k: any) => k.y || 0);
+          const xs = keypoints.map((k: any) => k.x || 0);
+          if (ys.length && xs.length) {
+            const minY = Math.min(...ys);
+            const maxY = Math.max(...ys);
+            const minX = Math.min(...xs);
+            const maxX = Math.max(...xs);
+            const ph = Math.max(1, maxY - minY);
+            const pw = Math.max(1, maxX - minX);
+            const aspect = ph / pw;
+            fallenForPoses.push(aspect < 0.6);
+          }
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
 
-    // weapon keywords (best-effort)
-    const weaponKeywords = ['knife', 'gun', 'pistol', 'rifle', 'revolver', 'weapon'];
-    const weaponDetected = mapped.some(m => weaponKeywords.some(k => m.label.includes(k)) && m.confidence > 0.55);
+    // Enhanced weapon detection using open-source ML model
+    let weaponDetected = false;
+    
+    // Only run weapon detection if enabled and video has valid dimensions
+    if (config.enableWeaponDetection && w > 0 && h > 0 && videoEl.readyState >= 2) {
+      try {
+        const weaponResult = await detectWeapons(videoEl);
+        weaponDetected = weaponResult.hasWeapon;
+        
+        // Add weapon detections to our mapped array
+        if (weaponResult.hasWeapon && weaponResult.detections.length > 0) {
+          for (const weaponDet of weaponResult.detections) {
+            mapped.push({
+              label: weaponDet.label.toLowerCase(),
+              bbox: {
+                x: weaponDet.box.xmin / w,
+                y: weaponDet.box.ymin / h,
+                width: (weaponDet.box.xmax - weaponDet.box.xmin) / w,
+                height: (weaponDet.box.ymax - weaponDet.box.ymin) / h,
+              },
+              confidence: weaponDet.score,
+            });
+          }
+        }
+      } catch (e) {
+        // Silently fall back to keyword-based detection
+        const weaponKeywords = ['knife', 'gun', 'pistol', 'rifle', 'revolver', 'weapon', 'firearm', 'blade', 'sword', 'machete', 'axe'];
+        weaponDetected = mapped.some(m => weaponKeywords.some(k => m.label.includes(k)) && m.confidence > 0.45);
+      }
+    } else {
+      // Video not ready, use keyword-based detection only
+      const weaponKeywords = ['knife', 'gun', 'pistol', 'rifle', 'revolver', 'weapon', 'firearm', 'blade', 'sword', 'machete', 'axe'];
+      weaponDetected = mapped.some(m => weaponKeywords.some(k => m.label.includes(k)) && m.confidence > 0.45);
+    }
 
     const summaryParts: string[] = [];
+    if (weaponDetected) summaryParts.push('⚠️ WEAPON DETECTED');
     if (personBoxes.length) summaryParts.push(`${personBoxes.length} person(s)`);
-    if (weaponDetected) summaryParts.push('possible weapon');
     if (fallenForPoses.some(Boolean)) summaryParts.push('possible fallen/unconscious');
     if (bleedingForBoxes.some(Boolean)) summaryParts.push('possible bleeding');
 
@@ -214,8 +270,8 @@ export function useVideoAnalyzer(options?: AnalyzerOptions) {
     if (fallenFrames >= Math.max(1, Math.floor(history.length / 4))) alertLevel = alertLevel === 'high' ? 'high' : 'medium';
 
     const parts: string[] = [];
+    if (weaponFrames) parts.push('⚠️ WEAPON DETECTED');
     if (maxPersons) parts.push(`${maxPersons} person(s)`);
-    if (weaponFrames) parts.push('possible weapon');
     if (fallenFrames) parts.push('possible fallen/unconscious');
     if (bleedingFrames) parts.push('possible bleeding');
 

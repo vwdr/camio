@@ -336,6 +336,12 @@ export function CameraStream() {
     setIsSecure(typeof window !== 'undefined' ? window.isSecureContext : true);
 
     async function getAvailableCameras() {
+      // Check if we're in a browser and mediaDevices is available
+      if (typeof window === 'undefined' || !navigator.mediaDevices) {
+        console.warn('navigator.mediaDevices not available');
+        return;
+      }
+
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = devices.filter(device => device.kind === 'videoinput');
@@ -444,6 +450,11 @@ export function CameraStream() {
       }
       // Start streaming
       try {
+        // Check if mediaDevices is available
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('navigator.mediaDevices.getUserMedia is not available. Ensure you are using HTTPS or localhost.');
+        }
+
         const constraints = {
           audio: true,
           video: {

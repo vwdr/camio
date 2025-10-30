@@ -162,12 +162,23 @@ export function CameraCard({ camera }: CameraCardProps) {
         const y = Math.max(0, Math.floor(bbox.y * canvas.height));
         const w = Math.max(0, Math.floor(bbox.width * canvas.width));
         const h = Math.max(0, Math.floor(bbox.height * canvas.height));
-        ctx.strokeStyle = 'rgba(16,185,129,0.9)'; // green
-        ctx.lineWidth = 3;
+        
+        // Check if this is a weapon detection
+        const weaponKeywords = ['knife', 'gun', 'pistol', 'rifle', 'revolver', 'weapon', 'firearm', 'blade', 'sword'];
+        const isWeapon = weaponKeywords.some(keyword => label.toLowerCase().includes(keyword));
+        
+        // Use RED for weapons, GREEN for other objects
+        const color = isWeapon ? 'rgba(239,68,68,0.9)' : 'rgba(16,185,129,0.9)'; // red for weapons, green for others
+        
+        ctx.strokeStyle = color;
+        ctx.lineWidth = isWeapon ? 4 : 3; // Thicker line for weapons
         ctx.strokeRect(x, y, w, h);
-        ctx.fillStyle = 'rgba(16,185,129,0.9)';
-        ctx.font = '14px sans-serif';
-        ctx.fillText(label, x + 4, y + 16);
+        ctx.fillStyle = color;
+        ctx.font = isWeapon ? 'bold 16px sans-serif' : '14px sans-serif';
+        
+        // Add warning emoji for weapons
+        const displayLabel = isWeapon ? `⚠️ ${label.toUpperCase()}` : label;
+        ctx.fillText(displayLabel, x + 4, y + 16);
       });
     } catch (e) {
       // ignore drawing errors

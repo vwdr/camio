@@ -667,12 +667,23 @@ export function CameraDetail({ camera }: CameraDetailProps) {
         const y = Math.max(0, Math.floor(bbox.y * canvas.height));
         const w = Math.max(0, Math.floor(bbox.width * canvas.width));
         const h = Math.max(0, Math.floor(bbox.height * canvas.height));
-        ctx.strokeStyle = 'rgba(16,185,129,0.9)';
-        ctx.lineWidth = 3;
+        
+        // Check if this is a weapon detection
+        const weaponKeywords = ['knife', 'gun', 'pistol', 'rifle', 'revolver', 'weapon', 'firearm', 'blade', 'sword'];
+        const isWeapon = weaponKeywords.some(keyword => label.toLowerCase().includes(keyword));
+        
+        // Use RED for weapons, GREEN for other objects
+        const color = isWeapon ? 'rgba(239,68,68,0.9)' : 'rgba(16,185,129,0.9)'; // red for weapons, green for others
+        
+        ctx.strokeStyle = color;
+        ctx.lineWidth = isWeapon ? 4 : 3; // Thicker line for weapons
         ctx.strokeRect(x, y, w, h);
-        ctx.fillStyle = 'rgba(16,185,129,0.9)';
-        ctx.font = '14px sans-serif';
-        ctx.fillText(label, x + 4, y + 16);
+        ctx.fillStyle = color;
+        ctx.font = isWeapon ? 'bold 16px sans-serif' : '14px sans-serif';
+        
+        // Add warning emoji for weapons
+        const displayLabel = isWeapon ? `⚠️ ${label.toUpperCase()}` : label;
+        ctx.fillText(displayLabel, x + 4, y + 16);
       });
     } catch (e) {
       // ignore
@@ -866,9 +877,20 @@ export function CameraDetail({ camera }: CameraDetailProps) {
                             const level = parts[0];
                             const summary = parts.slice(1).join(':');
                             if (!level || level === 'none') return null;
+                            
+                            // Check if weapon is detected in the summary
+                            const hasWeapon = summary && summary.toLowerCase().includes('weapon');
+                            
                             return (
-                              <div className={`text-xs px-2 py-1 rounded-md ${level === 'high' ? 'bg-red-600 text-white' : level === 'medium' ? 'bg-yellow-500 text-black' : 'bg-green-500 text-white'}`}>
-                                {level.toUpperCase()} {summary ? `• ${summary}` : ''}
+                              <div className="flex items-center gap-2">
+                                {hasWeapon && (
+                                  <div className="text-xs px-2 py-1 rounded-md bg-red-700 text-white font-bold animate-pulse border-2 border-red-300">
+                                    ⚠️ WEAPON DETECTED
+                                  </div>
+                                )}
+                                <div className={`text-xs px-2 py-1 rounded-md ${level === 'high' ? 'bg-red-600 text-white' : level === 'medium' ? 'bg-yellow-500 text-black' : 'bg-green-500 text-white'}`}>
+                                  {level.toUpperCase()} {summary ? `• ${summary}` : ''}
+                                </div>
                               </div>
                             );
                           })()

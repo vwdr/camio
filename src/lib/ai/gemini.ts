@@ -11,6 +11,7 @@ export async function analyzeImageWithGemini(imageData: string): Promise<{
   hasPerson: boolean;
   hasVehicle: boolean;
   hasPackage: boolean;
+  hasWeapon: boolean;
   hasSuspiciousActivity: boolean;
   confidence: number;
 }> {
@@ -23,7 +24,14 @@ export async function analyzeImageWithGemini(imageData: string): Promise<{
 
     const prompt = `Analyze this security camera image.
 
-    Identify any people, vehicles, packages, weapons, bleeding, or other suspicious/dangerous activity (robbery, person blacked out/unconscious, person bleeding, weapon visible, etc.).
+    Identify any people, vehicles, packages, weapons (guns, knives, firearms, blades, etc.), bleeding, or other suspicious/dangerous activity (robbery, person blacked out/unconscious, person bleeding, weapon visible, assault, fighting, etc.).
+
+    **IMPORTANT for weapon detection:**
+    - Look carefully for any firearms (guns, pistols, rifles, etc.)
+    - Look for knives, blades, or other sharp weapons
+    - Look for any objects being held in a threatening manner
+    - Set hasWeapon to true if ANY weapon is detected
+    - Include weapon type in detections array with high confidence
 
     For each detected object, return an entry with label and a bounding box in normalized coordinates (x, y, width, height) where x,y are top-left and values are between 0 and 1 relative to image dimensions. Also return an overall "suspicious" flag when behavior or context indicates immediate danger.
 
@@ -36,6 +44,7 @@ export async function analyzeImageWithGemini(imageData: string): Promise<{
       "hasPerson": boolean,
       "hasVehicle": boolean,
       "hasPackage": boolean,
+      "hasWeapon": boolean,
       "hasSuspiciousActivity": boolean,
       "confidence": number (0-100)
     }
@@ -70,6 +79,7 @@ export async function analyzeImageWithGemini(imageData: string): Promise<{
         hasPerson: !!analysisResult.hasPerson,
         hasVehicle: !!analysisResult.hasVehicle,
         hasPackage: !!analysisResult.hasPackage,
+        hasWeapon: !!analysisResult.hasWeapon,
         hasSuspiciousActivity: !!analysisResult.hasSuspiciousActivity,
         confidence: analysisResult.confidence || 0,
         // include raw detections for client use
@@ -83,6 +93,7 @@ export async function analyzeImageWithGemini(imageData: string): Promise<{
         hasPerson: false,
         hasVehicle: false,
         hasPackage: false,
+        hasWeapon: false,
         hasSuspiciousActivity: false,
         confidence: 0
       };
@@ -95,6 +106,7 @@ export async function analyzeImageWithGemini(imageData: string): Promise<{
       hasPerson: false,
       hasVehicle: false,
       hasPackage: false,
+      hasWeapon: false,
       hasSuspiciousActivity: false,
       confidence: 0
     };
@@ -108,6 +120,7 @@ export async function analyzeVideoFrame(videoElement: HTMLVideoElement, canvasEl
   hasPerson: boolean;
   hasVehicle: boolean;
   hasPackage: boolean;
+  hasWeapon: boolean;
   hasSuspiciousActivity: boolean;
   confidence: number;
 }> {
@@ -139,6 +152,7 @@ export async function analyzeVideoFrame(videoElement: HTMLVideoElement, canvasEl
       hasPerson: false,
       hasVehicle: false,
       hasPackage: false,
+      hasWeapon: false,
       hasSuspiciousActivity: false,
       confidence: 0
     };
